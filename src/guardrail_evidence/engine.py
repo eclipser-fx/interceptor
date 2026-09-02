@@ -435,6 +435,10 @@ def _safe_output_hash(
     so a returned dataclass holding a token hashes as ``<REDACTED>`` rather
     than as the token.
     """
+    # Suppress hashing when the returned value echoes any redacted input,
+    # even with a type change (e.g. int PIN 9074 -> str "9074" in exception).
+    if redacted_values and result is not None and str(result) in redacted_values:
+        return None
     if isinstance(result, str) and result in redacted_values:
         return None
     try:
