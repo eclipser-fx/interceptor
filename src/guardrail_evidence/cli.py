@@ -93,6 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
         "inspect", help="report what a journal would disclose if shared"
     )
     inspect.add_argument("--journal", type=Path, default=None, help="journal path")
+    inspect.add_argument(
+        "--public-key",
+        type=Path,
+        default=None,
+        help="verifying key path (defaults to the trusted key set)",
+    )
     inspect.add_argument("--json", action="store_true", help="emit JSON")
 
     audit = subparsers.add_parser(
@@ -241,7 +247,11 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         _fail(f"no journal at {journal_path}", as_json=args.json)
         return EXIT_FAILURE
 
-    report = inspect_journal(journal_path)
+    try:
+        report = inspect_journal(journal_path, public_key_path=getattr(args, "public_key", None))
+    except GuardrailError as exc:
+        _fail(str(exc), as_json=args.json)
+        return EXIT_FAILURE
     payload = {
         "journal": str(journal_path),
         "event_count": report.event_count,
