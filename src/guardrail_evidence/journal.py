@@ -114,7 +114,11 @@ class FileJournal:
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        key = str(path.resolve()) if path.is_absolute() else str(path)
+        try:
+            key = str(Path(path).resolve())
+        except Exception:
+            # Fallback for exotic paths where resolve() fails (permission, loop).
+            key = str(Path.cwd() / path) if not path.is_absolute() else str(path)
         with _process_locks_guard:
             self._lock = _process_locks.setdefault(key, threading.Lock())
 
