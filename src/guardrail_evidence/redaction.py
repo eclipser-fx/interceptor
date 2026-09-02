@@ -19,6 +19,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from .canonical import REDACTED, fold_name
+from .errors import ContractError
 
 #: Built-in sensitive names, lowercase. Matching is case-insensitive and
 #: confusable-insensitive (see :func:`guardrail_evidence.canonical.fold_name`).
@@ -51,7 +52,15 @@ def build_sensitive_set(extra_names: Iterable[str] | None = None) -> frozenset[s
     """The built-in sensitive set plus caller-declared names, folded to ASCII."""
     if not extra_names:
         return SENSITIVE_NAMES
-    return SENSITIVE_NAMES | {fold_name(str(name)) for name in extra_names}
+    folded: set[str] = set()
+    for raw in extra_names:
+        if not isinstance(raw, str):
+            raise ContractError(f"redact name {raw!r} must be a string")
+        name = fold_name(raw)
+        if not name.strip():
+            raise ContractError(f"redact name {raw!r} folds to empty; provide a non-empty name")
+        folded.add(name)
+    return SENSITIVE_NAMES | frozenset(folded)
 
 
 def bounded_summary(redacted_canonical: Any) -> str:
