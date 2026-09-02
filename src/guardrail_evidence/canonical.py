@@ -199,8 +199,13 @@ def canonicalize(value: Any, sensitive: frozenset[str] = frozenset()) -> Canonic
 
 def _redact(value: Any, collected: list[str]) -> str:
     """Replace a sensitive value, remembering it for later error scrubbing."""
-    if isinstance(value, str) and len(value) >= _MIN_SCRUBBABLE_LENGTH:
+    if isinstance(value, str) and value:
         collected.append(value)
+    elif value is not None and not isinstance(value, str):
+        # Non-string secrets (e.g. int PIN) still echo as text in exceptions.
+        text = str(value)
+        if text:
+            collected.append(text)
     return REDACTED
 
 
