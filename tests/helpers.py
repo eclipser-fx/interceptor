@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from guardrail_evidence.approval import ApprovalDecision, ApprovalRequest
-from guardrail_evidence.contracts import ActionContract
+from interceptor.approval import ApprovalDecision, ApprovalRequest
+from interceptor.contracts import ActionContract
 
 
 @dataclass
