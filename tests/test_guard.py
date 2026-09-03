@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-import guardrail_evidence as ge
-from guardrail_evidence import guard
-from guardrail_evidence.identity import LocalSigningIdentity, load_public_key
-from guardrail_evidence.journal import JournalStore
-from guardrail_evidence.verification import verify_journal
+import interceptor as ge
 from helpers import RecordingObserver, StaticProvider, allow, deny
+from interceptor import guard
+from interceptor.identity import LocalSigningIdentity, load_public_key
+from interceptor.journal import JournalStore
+from interceptor.verification import verify_journal
 
 
 def events(home: Path) -> list[dict]:
@@ -254,7 +254,7 @@ def test_contract_is_attached_and_stable(evidence_home):
     def act(a: int, b: str = "x"):
         return None
 
-    contract = act.__guardrail_contract__
+    contract = act.__interceptor_contract__
     assert contract.action_name == "test.contract"
     assert contract.risk == "high"
     assert contract.execution_mode == "embedded"
@@ -356,7 +356,7 @@ def test_bare_decorator_form_applies_the_safe_defaults(evidence_home):
     def act():
         return "ok"
 
-    contract = act.__guardrail_contract__
+    contract = act.__interceptor_contract__
     assert contract.risk == "medium"
     assert contract.approval_mode == "required"
     # Default name is the code location: module + qualified name.
@@ -378,8 +378,8 @@ def test_bare_and_called_forms_produce_the_same_contract(evidence_home):
     def called(a: int, b: str = "x"):
         return None
 
-    bare_contract = bare.__guardrail_contract__
-    called_contract = called.__guardrail_contract__
+    bare_contract = bare.__interceptor_contract__
+    called_contract = called.__interceptor_contract__
     assert bare_contract.risk == called_contract.risk
     assert bare_contract.approval_mode == called_contract.approval_mode
     assert [p.name for p in bare_contract.parameter_descriptors] == [
