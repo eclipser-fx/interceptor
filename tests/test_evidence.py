@@ -10,22 +10,22 @@ from pathlib import Path
 
 import pytest
 
-import guardrail_evidence as ge
-from guardrail_evidence import guard
-from guardrail_evidence.canonical import (
+import interceptor as ge
+from helpers import allow
+from interceptor import guard
+from interceptor.canonical import (
     REDACTED,
     canonical_json_bytes,
     canonicalize,
     sha256_hex,
 )
-from guardrail_evidence.identity import LocalSigningIdentity, load_public_key
-from guardrail_evidence.journal import (
+from interceptor.identity import LocalSigningIdentity, load_public_key
+from interceptor.journal import (
     _read_last_event_hash,
     _read_last_event_hash_scan,
 )
-from guardrail_evidence.redaction import build_sensitive_set
-from guardrail_evidence.verification import verify_journal
-from helpers import allow
+from interceptor.redaction import build_sensitive_set
+from interceptor.verification import verify_journal
 
 
 def make_journal(home: Path, count: int) -> Path:
@@ -178,7 +178,7 @@ def test_backward_tail_read_matches_forward_scan(evidence_home):
 
 
 def test_tail_read_handles_a_line_longer_than_the_window(evidence_home, monkeypatch):
-    monkeypatch.setattr("guardrail_evidence.journal._TAIL_READ_BYTES", 8)
+    monkeypatch.setattr("interceptor.journal._TAIL_READ_BYTES", 8)
     path = make_journal(evidence_home, 3)
 
     with open(path, "a+b") as handle:
