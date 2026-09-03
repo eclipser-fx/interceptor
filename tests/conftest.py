@@ -14,7 +14,8 @@ from typing import Any
 
 import pytest
 
-from guardrail_evidence.observer import reset_notifications
+from interceptor.engine import reset_idempotency_state
+from interceptor.observer import reset_notifications
 
 _REAL_SOCKET = socket.socket
 _REAL_CREATE_CONNECTION = socket.create_connection
@@ -50,8 +51,10 @@ def allow_socket_creation(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_observer_state() -> None:
     """Observer notifications are once-per-process; tests need a clean slate."""
     reset_notifications()
+    reset_idempotency_state()
     yield
     reset_notifications()
+    reset_idempotency_state()
 
 
 @pytest.fixture
@@ -59,5 +62,5 @@ def evidence_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """An isolated evidence home, so tests never touch the real one."""
     home = tmp_path / "evidence-home"
     home.mkdir()
-    monkeypatch.setenv("GUARDRAIL_EVIDENCE_HOME", str(home))
+    monkeypatch.setenv("INTERCEPTOR_EVIDENCE_HOME", str(home))
     return home
