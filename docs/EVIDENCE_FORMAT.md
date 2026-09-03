@@ -42,6 +42,11 @@ redacted in the same traversal:
 At every point that produces a **name** — a mapping key, a dataclass field, a
 named-tuple field — the name is lowercased and matched against the sensitive
 set. A match replaces the value with the literal string `"<REDACTED>"`.
+Additionally, any **string value** matching a value pattern (built-in secret
+patterns such as `sk-live-…`, `ghp_…`, `AKIA…`, PEM keys, JWTs, plus caller
+regexes via `redact_patterns`) is replaced with `"<REDACTED>"`, even under a
+generic name. Pattern-matched results also suppress `redacted_output_hash`,
+since hashing a recognizable secret commits something confirmable by guessing.
 
 Named tuples must be checked before the generic tuple branch. A named tuple is
 a `tuple`, and treating it as a sequence discards the field names, which is
@@ -56,11 +61,11 @@ Every event carries:
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | string | `"1"` |
-| `event_type` | string | `"decision"`, `"outcome"`, or `"checkpoint"` |
+| `event_type` | string | `"decision"`, `"outcome"`, `"checkpoint"`, `"resolution"`, `"countersignature"`, or `"archive"` |
 | `event_id` | string | UUIDv4 |
-| `action_id` | string | `module.qualified_name` |
-| `action_name` | string | declared logical name |
-| `contract_hash` | string | SHA-256 hex of the contract |
+| `action_id` | string | `module.qualified_name` (absent on `checkpoint`/`countersignature`) |
+| `action_name` | string | declared logical name (absent on `checkpoint`/`countersignature`) |
+| `contract_hash` | string | SHA-256 hex of the contract (absent on `checkpoint`/`countersignature`) |
 | `timestamp_utc` | string | RFC 3339 UTC, microseconds, `Z` suffix |
 | `key_id` | string | `ed25519:` + first 16 hex of SHA-256 of the raw public key |
 | `previous_event_hash` | string \| null | previous line's `event_hash`; `null` for the first |
@@ -78,6 +83,11 @@ Every event carries:
 | `parameter_retention` | list of `{"name", "state"}` records |
 | `input_hash` | SHA-256 hex over the redacted canonical arguments |
 | `metadata` | object, optional |
+| `idempotency_key` | string, optional — the caller-supplied duplicate guard |
+| `dry_run` | boolean, optional — true when the function was not executed |
+| `duplicate_of` | string, optional — prior decision `event_id` this duplicate was blocked by |
+| `approval_reason` | string — the provider's reason, scrubbed of redacted values, bounded |
+| `approved_by` | string, optional — provider-supplied approver identity, scrubbed, bounded |
 
 `parameter_retention` records, for each top-level argument in canonical key
 order, whether its recorded value is the redaction marker (`"redacted"`), an
@@ -103,6 +113,13 @@ parsing.
 input values — hashing a low-entropy secret commits something confirmable by
 guessing — or when the result is not canonicalizable.
 
+`outcome` events optionally carry `receipt`: the redacted canonical provider
+receipt (external reference IDs such as a processor's refund id), as an object.
+It is transcribed from the guarded function's return value via a caller
+extractor, so it attests to what the function *claimed*, not to what the
+provider did. Non-object, oversized, or non-canonicalizable receipts are
+dropped rather than recorded, and never fail the call.
+
 `checkpoint` events add:
 
 | Field | Type |
@@ -115,6 +132,40 @@ and hash-chained like every other event, and its canonical JSON line is a
 self-contained **witness**: copied somewhere the journal cannot reach, it lets a
 verifier treat any journal shorter than `checkpoint_count` as truncated. See
 `THREAT_MODEL.md` for why tail truncation otherwise escapes offline detection.
+
+`resolution` events add (carrying the referenced decision's `action_id`,
+`action_name`, and `contract_hash`):
+
+| Field | Type |
+|---|---|
+| `decision_event_id` | the reconciled decision's `event_id` |
+| `resolution` | `"confirmed_completed"` \| `"confirmed_not_completed"` |
+| `note` | operator note, bounded to 1000 chars |
+
+A resolution is an operator attestation that the external system was checked,
+not proof of the external result.
+
+`countersignature` events add (no action fields — they attest to a checkpoint,
+not an action):
+
+| Field | Type |
+|---|---|
+| `checkpoint_event_id` | the counter-signed checkpoint's `event_id` |
+| `checkpoint_count` | must equal the referenced checkpoint's count |
+| `head_sha256` | must equal the referenced checkpoint's head |
+
+The referenced checkpoint must appear earlier in the same journal; the
+countersignature is signed by a second key and verified against the same
+trusted keyring.
+
+`archive` events have no action fields and must be the first line of their
+file. They link a rotated successor back to its predecessor:
+
+| Field | Type |
+|---|---|
+| `prior_count` | positive integer — events the archived file held |
+| `prior_head` | the archived file's last `event_hash` |
+| `archived_path` | file name (not path) of the archived predecessor |
 
 ## Hashing and signing
 
@@ -190,17 +241,28 @@ the `audit` command applies these additional rules:
 
 - every `event_id` is unique;
 - every outcome references an earlier decision;
+- every resolution references an earlier decision (else `orphan_resolution`);
+- conflicting resolutions for one decision are flagged (`conflicting_resolution`,
+  latest wins); a resolution contradicting a `succeeded` outcome is flagged and
+  left open (`conflicting_resolution` + `needs_reconciliation`);
 - no decision has more than one outcome;
 - an outcome may reference only an `allowed` decision;
 - the outcome's `action_id`, `action_name`, and `contract_hash` match its decision;
 - decision values and outcome statuses are from their documented enums.
 
 An allowed decision without an outcome is valid evidence of an incomplete
-invocation, not malformed evidence. It is reported as `needs_reconciliation`.
-Both that state and a recorded `failed` outcome make the command exit non-zero:
+invocation, not malformed evidence. It is reported as `needs_reconciliation`,
+except when the decision carries `dry_run: true`, which is reported as
+`dry_run` — a deliberate non-execution that never needs reconciliation — and
+except when a resolution closed it: `resolved_completed` (side effect confirmed,
+do not retry) or `resolved_not_completed` (side effect absent, retry is safe).
+Both `needs_reconciliation` and a recorded `failed` outcome make the command
+exit non-zero:
 an external side effect may have occurred before an exception or process death,
 so automatic retry is unsafe. `succeeded` means the guarded function returned
-normally; it does not prove the external side effect occurred.
+normally; it does not prove the external side effect occurred. Two `succeeded`
+outcomes under the same `(action_name, idempotency_key)` are reported as a
+`duplicate_idempotency_key` issue: at most one should exist.
 
 Note what the algorithm cannot check: that the chain is *complete*. Any prefix
 of a valid chain is itself a valid chain. See
