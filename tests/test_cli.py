@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from guardrail_evidence import guard
-from guardrail_evidence.cli import EXIT_FAILURE, EXIT_OK, main
 from helpers import allow
+from interceptor import guard
+from interceptor.cli import EXIT_FAILURE, EXIT_OK, main
 
 
 def record(action: str = "cli.test", **kwargs) -> None:
