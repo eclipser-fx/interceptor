@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 
-from guardrail_evidence import checkpoint_journal, guard, verify_journal
-from guardrail_evidence.cli import EXIT_FAILURE, EXIT_OK, main
-from guardrail_evidence.identity import LocalSigningIdentity, load_public_key
 from helpers import allow
+from interceptor import checkpoint_journal, guard, verify_journal
+from interceptor.cli import EXIT_FAILURE, EXIT_OK, main
+from interceptor.identity import LocalSigningIdentity, load_public_key
 
 
 def recorded_actions(evidence_home, count: int = 2) -> None:
@@ -196,7 +196,7 @@ def test_witness_signed_by_another_key_fails(evidence_home, monkeypatch, tmp_pat
     report = checkpoint_journal(journal)
 
     other_home = tmp_path / "other-home"
-    monkeypatch.setenv("GUARDRAIL_EVIDENCE_HOME", str(other_home))
+    monkeypatch.setenv("INTERCEPTOR_EVIDENCE_HOME", str(other_home))
     other_identity = LocalSigningIdentity.load_or_create()
     other_key = load_public_key(other_identity.public_key_path)
 
@@ -209,7 +209,7 @@ def test_witness_signed_by_another_key_fails(evidence_home, monkeypatch, tmp_pat
 
 
 def test_audit_and_inspect_skip_checkpoint_events(evidence_home):
-    from guardrail_evidence import audit_journal, inspect_journal
+    from interceptor import audit_journal, inspect_journal
 
     journal = evidence_home / "journal.jsonl"
     recorded_actions(evidence_home)
