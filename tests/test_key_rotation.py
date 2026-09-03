@@ -10,22 +10,22 @@ from __future__ import annotations
 
 import json
 
-from guardrail_evidence import (
+from helpers import allow
+from interceptor import (
     audit_journal,
     checkpoint_journal,
     guard,
     inspect_journal,
     verify_journal,
 )
-from guardrail_evidence.cli import EXIT_FAILURE, EXIT_OK, main
-from guardrail_evidence.identity import (
+from interceptor.cli import EXIT_FAILURE, EXIT_OK, main
+from interceptor.identity import (
     LocalSigningIdentity,
     key_id_for,
     load_public_key,
     load_trusted_public_keys,
     rotate_key,
 )
-from helpers import allow
 
 
 def record(evidence_home, action: str = "test.rotation.act", count: int = 2) -> None:
@@ -195,7 +195,7 @@ def test_verify_ignores_unrelated_keys_but_accepts_the_signing_generations(
 
     other_home = tmp_path / "other-home"
     other_home.mkdir()
-    monkeypatch.setenv("GUARDRAIL_EVIDENCE_HOME", str(other_home))
+    monkeypatch.setenv("INTERCEPTOR_EVIDENCE_HOME", str(other_home))
     other = LocalSigningIdentity.load_or_create()
 
     # The unrelated key alone proves nothing about this journal.
@@ -215,7 +215,7 @@ def test_rotation_records_are_not_silently_trusted(evidence_home, monkeypatch, t
     record(evidence_home)
     other_home = tmp_path / "other-home"
     other_home.mkdir()
-    monkeypatch.setenv("GUARDRAIL_EVIDENCE_HOME", str(other_home))
+    monkeypatch.setenv("INTERCEPTOR_EVIDENCE_HOME", str(other_home))
     other = LocalSigningIdentity.load_or_create()
 
     forged = json.loads((evidence_home / "journal.jsonl").read_text().splitlines()[0])
