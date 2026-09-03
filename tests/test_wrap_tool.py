@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
-import guardrail_evidence as ge
-from guardrail_evidence import guard, wrap_tool, wrap_tools
-from guardrail_evidence.identity import LocalSigningIdentity, load_public_key
-from guardrail_evidence.verification import verify_journal
+import interceptor as ge
 from helpers import RecordingObserver, allow, deny
+from interceptor import guard, wrap_tool, wrap_tools
+from interceptor.identity import LocalSigningIdentity, load_public_key
+from interceptor.verification import verify_journal
 
 
 def events(home: Path) -> list[dict]:
@@ -65,8 +65,8 @@ def test_wrap_tool_does_not_mutate_the_original(evidence_home):
         return customer_id
 
     wrapped = wrap_tool(refund, action="test.no.mutate", approval_provider=allow())
-    assert not hasattr(refund, "__guardrail_contract__")
-    assert hasattr(wrapped, "__guardrail_contract__")
+    assert not hasattr(refund, "__interceptor_contract__")
+    assert hasattr(wrapped, "__interceptor_contract__")
     assert wrapped("x") == "x"
     assert refund("x") == "x"
 
