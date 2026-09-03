@@ -6,11 +6,11 @@ import json
 
 import pytest
 
-from guardrail_evidence import ActionDenied, InvocationStatus, audit_journal, guard
-from guardrail_evidence.errors import EvidenceAuditError
-from guardrail_evidence.identity import LocalSigningIdentity
-from guardrail_evidence.journal import FileJournal, finalize_event, new_event_id, utc_timestamp
 from helpers import allow, deny
+from interceptor import ActionDenied, InvocationStatus, audit_journal, guard
+from interceptor.errors import EvidenceAuditError
+from interceptor.identity import LocalSigningIdentity
+from interceptor.journal import FileJournal, finalize_event, new_event_id, utc_timestamp
 
 
 def audit(home):
