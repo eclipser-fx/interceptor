@@ -1,6 +1,6 @@
 # Security
 
-`guardrail-evidence` writes signed, hash-chained evidence for consequential
+`interceptor` writes signed, hash-chained evidence for consequential
 calls. Its trust model matters more than its code does, so read
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) before reporting or fixing.
 
@@ -14,7 +14,7 @@ Report it privately instead:
 - If you have write access to the repository, use GitHub's private security
   advisory flow.
 - Otherwise, email the maintainers via the contact address listed on the
-  project page, and include "guardrail-evidence" in the subject line.
+  project page, and include "interceptor" in the subject line.
 
 Please include:
 
@@ -56,7 +56,7 @@ Explicitly out of scope, because the threat model states them as limits:
   it protects integrity across key changes, it does not authenticate a key.
   Pin the public key out-of-band (e.g. `--public-key`) for real authentication.
 - Never paste a private key or a journal into an issue.
-- A journal that failed `guardrail-evidence verify` is evidence of tampering or
+- A journal that failed `interceptor verify` is evidence of tampering or
   corruption; do not discard it, keep it for analysis.
 
 ## Supported versions
