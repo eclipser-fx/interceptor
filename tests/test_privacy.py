@@ -14,18 +14,18 @@ import json
 
 import pytest
 
-import guardrail_evidence as ge
-from guardrail_evidence.canonical import UNSUPPORTED_MARKER, canonicalize
-from guardrail_evidence.privacy import (
+import interceptor as ge
+from helpers import allow
+from interceptor.canonical import UNSUPPORTED_MARKER, canonicalize
+from interceptor.privacy import (
     PrivacyClassification,
     _classify_retention,
     _classify_summary,
     inspect_journal,
     inspect_verified_snapshot,
 )
-from guardrail_evidence.redaction import SENSITIVE_NAMES, bounded_summary
-from guardrail_evidence.verification import JournalSnapshot, VerificationResult
-from helpers import allow
+from interceptor.redaction import SENSITIVE_NAMES, bounded_summary
+from interceptor.verification import JournalSnapshot, VerificationResult
 
 
 def classify(value, sensitive: frozenset[str] = SENSITIVE_NAMES):
