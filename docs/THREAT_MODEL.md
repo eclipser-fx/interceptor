@@ -15,7 +15,7 @@ who produced it.
 The guarantees hold only while all of these do:
 
 1. **The signing key is secret.** It lives at
-   `~/.guardrail_evidence/signing_key.pem`, mode `0600`, unencrypted. Anyone
+   `~/.interceptor/signing_key.pem`, mode `0600`, unencrypted. Anyone
    who can read that file can forge an entire journal that verifies.
 2. **The verifier has an authentic public key.** Verification proves a chain
    was signed by whoever holds the private half of the key you supply. If the
@@ -77,7 +77,51 @@ modification.
 
 Counter-signatures from a second party, or shipping events to an append-only
 remote as they are written, would detect even re-signing truncation. The
-`ActionObserver` hook is not that — it sees contracts, not events.
+`ActionObserver` hook is not that — it sees contracts, not events. The
+`countersign` command is a partial answer: a second key held elsewhere signs
+the newest checkpoint in-chain, so rewriting history afterwards requires both
+keys. It does not cover events after the countersignature, and a second party
+that signs blindly attests to nothing — countersign only checkpoints you have
+verified. Shipping events to an append-only remote as they are written remains
+unimplemented.
+
+### Resolutions are attestations, not evidence
+
+A `resolution` event says an operator claims to have checked the external
+system. It is signed and chained like everything else, but its *content* rests
+on operator honesty: `confirmed_not_completed` followed by a retry that double-
+charges is an operator error the journal faithfully records, not a forgery it
+prevents. Conflicting resolutions and resolutions contradicting a `succeeded`
+outcome are flagged by `audit` rather than resolved silently, for exactly this
+reason.
+
+### Receipts are transcribed claims
+
+A `receipt` binds external reference IDs (a processor's refund id) into the
+signed outcome — but the extractor runs against the guarded function's *return
+value*, inside the same trust domain as the function itself. A function that
+lies about the refund id produces a faithfully-signed lie. Receipts upgrade
+"the function returned" to "the function named this external record", which
+makes later reconciliation against provider statements possible; they do not
+verify the provider did anything.
+
+### Archiving preserves custody, pruning destroys it
+
+Each `archive` event links its file to the predecessor's `(count, head)`, so
+custody survives rotation as long as every file is kept. `--keep` deletion is
+an operator decision to destroy evidence: pruned archives cannot be verified
+afterwards, and a chain of custody with a missing link proves nothing about
+the gap. Archive storage, like checkpoints and counter-keys, must live where
+the live journal cannot reach — otherwise rotation is just slower truncation.
+
+### The approval web page is phishing-adjacent
+
+`ApprovalServer` shows the redacted summary only, and its token URL is a bearer
+credential: anyone holding it can approve pending actions from the LAN. Serve
+it on loopback unless approving from another device is the point, keep the URL
+out of logs and chat, and treat an approval clicked on an unfamiliar page as a
+denial. A quorum of two independent approvers (`QuorumApprovalProvider`) beats
+one approver with a leaked URL.
 
 ### A dishonest process
 
@@ -95,14 +139,31 @@ weakly evidenced.
 
 ### Secrets you did not name
 
-Redaction is name-based. A secret passed as `data` or `payload` is not
-redacted, because nothing marks it as sensitive. Use `redact=[...]`, and use
-`guardrail-evidence inspect` to see what a journal would actually disclose
+Redaction is name-based, plus a narrow set of high-precision value patterns
+(`sk-live-…`, `ghp_…`, `xoxb-…`, `AKIA…`, PEM private keys, JWTs, and caller
+regexes via `redact_patterns`). A secret passed as `data` or `payload` that
+matches no pattern is not redacted, because nothing marks it as sensitive.
+Use `redact=[...]` and `redact_patterns=[...]`, and use
+`interceptor inspect` to see what a journal would actually disclose
 before sharing it.
 
 Name-based redaction also cannot help with a secret embedded inside a larger
-string — a connection string in a `url` parameter, a token inside a JSON blob
-passed as text. Those pass through.
+string unless a value pattern matches the whole value — note patterns replace
+the *entire string value*, so `prefix sk-live-… suffix` is fully redacted,
+while an unrecognized embedding (a token inside a JSON blob passed as text
+with no matching pattern) passes through. Value patterns are best-effort
+against novel secret formats: they cover known prefixes, not arbitrary entropy.
+
+### Idempotency scope
+
+`idempotency_key` blocks a second execution after a recorded `succeeded`
+outcome; it does not replay results and does not prove the external side
+effect happened exactly once — a crash between the side effect and the outcome
+write still leaves `needs_reconciliation`, and a concurrent duplicate in
+another process can pass the check before either outcome is recorded (the
+second writer then records a denied duplicate or a second success, which
+`audit` flags as `duplicate_idempotency_key`). Custom `JournalStore`
+implementations are deduplicated within the process only.
 
 ### Unicode lookalikes
 
@@ -162,13 +223,15 @@ result; an operator must check the provider or target system before retrying.
 In rough order of value per unit of work:
 
 1. **Checkpoint the tail.** Periodically record `(length, last_event_hash)`
-   somewhere separate. Closes the largest gap.
+   somewhere separate. Closes the largest gap. (Implemented: `checkpoint`.)
 2. **Counter-sign.** A second party signing periodic checkpoints turns a
-   self-attestation into something closer to a witnessed one.
+   self-attestation into something closer to a witnessed one. (Implemented:
+   `countersign` with an external key; still manual and per-checkpoint, not
+   continuous remote shipping.)
 3. **Hardware-backed keys.** A key in a TPM, Secure Enclave, or HSM cannot be
    copied out of the file, which addresses trust assumption 1 directly.
 4. **Signed rotation records.** The trusted set today is local operator state;
    a signed, witnessed rotation event would let a compromise of the *current*
    key have a cleanly bounded blast radius instead of an operator-managed one.
 
-None of these are implemented.
+Items 3 and 4 are not implemented.
