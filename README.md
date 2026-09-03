@@ -1,10 +1,10 @@
-# guardrail-evidence
+# interceptor
 
 Approval-gated, tamper-evident evidence for consequential Python function
 calls — the ones you would not want to happen twice, silently, or unapproved.
 
 ```python
-from guardrail_evidence import guard
+from interceptor import guard
 
 
 @guard(action="billing.refund", risk="high")
@@ -16,8 +16,9 @@ That decorator does four things on every call:
 
 1. asks for approval, and **denies by default** if nobody can answer;
 2. writes a signed `decision` record **before** the function runs;
-3. runs the function exactly once;
-4. writes a signed `outcome` record after.
+3. runs the function exactly once — unless `dry_run=True` (never runs) or its
+   `idempotency_key` already completed (raises `DuplicateActionError` instead);
+4. writes a signed `outcome` record after (skipped for dry runs).
 
 The records form a hash chain in an append-only file, signed with a local
 Ed25519 key. `api_key` never appears in the file, in the approval prompt, or in
@@ -27,8 +28,8 @@ There is no service behind this. No account, no API key, no network — the
 whole guarantee is a local key and a file you can verify offline:
 
 ```console
-$ guardrail-evidence verify
-OK  ~/.guardrail_evidence/journal.jsonl
+$ interceptor verify
+OK  ~/.interceptor/journal.jsonl
     2 events, signatures and hash chain intact
     note: tail truncation is detectable only with a checkpoint witness
 ```
@@ -36,11 +37,34 @@ OK  ~/.guardrail_evidence/journal.jsonl
 ## Install
 
 ```sh
-pip install guardrail-evidence
+pip install interceptor
 ```
 
 One runtime dependency: `cryptography`, for Ed25519. Everything else is the
 standard library.
+
+## What's new in interceptor
+
+Renamed from `guardrail-evidence` (package `interceptor`, CLI `interceptor`,
+home `~/.interceptor`, env `INTERCEPTOR_EVIDENCE_HOME`), plus new capabilities:
+
+- **Value-pattern redaction** — built-in secret shapes (`sk-live-…`, `ghp_…`,
+  `xoxb-…`, `AKIA…`, PEM keys, JWTs) redacted even under generic names, with
+  custom `redact_patterns=[...]` regexes on `@guard` and `wrap_tool`.
+- **Policy approvals** (`interceptor.policy`) — composable offline providers:
+  `BudgetProvider`, `RateLimitProvider`, `AllowListProvider`/`PredicateProvider`,
+  `CachedApprovalProvider` (TTL auto-allow of identical calls, every call still
+  evidenced), `TimeoutApprovalProvider` (fail-closed), `AllOf`/`AnyOf`.
+- **Idempotency** (`idempotency_key=`) — a completed key records a denied
+  decision and raises `DuplicateActionError` instead of executing twice.
+  Retries after failure still run. File journals deduplicate across processes.
+- **Dry runs** (`dry_run=True`) — records the signed decision, returns `None`,
+  never executes; audits report `dry_run`, never `needs_reconciliation`.
+- **Easier bulk wrapping** — `wrap_tools(tools, risk="high")` now works without
+  an explicit `configuration` mapping (action per tool name).
+- **Hardening** — the once-per-process observer tracker no longer keys on
+  `id()` (a collected observer can't suppress a later one); audit flags
+  repeated `(action, idempotency_key)` successes as `duplicate_idempotency_key`.
 
 ## What problem this solves
 
@@ -96,7 +120,7 @@ that is not an explicit yes. Off a TTY — CI, cron, a daemon — it raises rath
 than assuming consent.
 
 ```python
-from guardrail_evidence import ApprovalDecision, guard
+from interceptor import ApprovalDecision, guard
 
 
 class PolicyProvider:
@@ -125,12 +149,86 @@ others) are matched at any depth, case-insensitively and confusable-insensitivel
 def verify(user_id: str, pin: str): ...
 ```
 
+On top of name-based redaction, built-in **value patterns** catch secrets
+passed under generic names (`data`, `payload`) or embedded in larger strings:
+`sk-live-…`/`sk-test-…`, `ghp_…`/`gho_…`, `xoxb-…`, `AKIA…`, PEM private keys,
+and JWTs. Any string value matching one becomes `<REDACTED>`, its output hash
+is suppressed, and exception text is scrubbed. Add your own regexes:
+
+```python
+@guard(action="orders.create", redact_patterns=[r"ORDER-\d{6}"])
+def create(payload: str): ...
+```
+
+### Policy approvals
+
+`interceptor.policy` ships composable, offline providers — budgets, sliding-window
+rate limits, allow-lists/predicates, TTL caching of identical allows, timeouts,
+and `AllOf`/`AnyOf` combinations:
+
+```python
+from interceptor import TerminalApprovalProvider
+from interceptor.policy import (
+    AllOf,
+    BudgetProvider,
+    RateLimitProvider,
+    TimeoutApprovalProvider,
+)
+
+policy = AllOf(
+    [
+        BudgetProvider(100, per_action=True),
+        RateLimitProvider(10, window_seconds=60),
+        TimeoutApprovalProvider(TerminalApprovalProvider(), timeout_seconds=300),
+    ]
+)
+
+
+@guard(action="billing.refund", risk="high", approval_provider=policy)
+def refund(order_id: str, amount_cents: int): ...
+```
+
+All deny on exhaustion/error (fail closed) and perform no I/O. `CachedApprovalProvider`
+remembers identical `allowed` decisions for a TTL so repeats don't re-prompt —
+each call still writes its own decision/outcome evidence; denials are never cached.
+
+### Idempotency and dry runs
+
+Pass `idempotency_key` as a parameter name, a literal, or a callable over the
+bound arguments. A key that already completed successfully records a denied
+decision and raises `DuplicateActionError` (a subclass of `ActionDenied`)
+without executing — retries after failure are still allowed:
+
+```python
+from interceptor import guard
+
+
+@guard(action="billing.refund", risk="high", idempotency_key="order_id")
+def refund(order_id: str, amount_cents: int): ...
+```
+
+Cross-process detection scans the file journal; custom `JournalStore`s are
+covered within the process. This blocks duplicates — it does not replay
+results, since results are never stored.
+
+`dry_run=True` records the signed decision event and returns `None` without
+executing and without an outcome. Audits classify it as `dry_run`, never as
+needing reconciliation. `DuplicateActionError` subclasses `ActionDenied`, so
+existing denial handlers catch duplicate attempts too.
+
 ### Wrapping tools you did not write
 
 ```python
-from guardrail_evidence import wrap_tools
+from interceptor import wrap_tools
 
-safe_tools = wrap_tools(existing_tools, risk="high")
+safe_tools = wrap_tools(existing_tools, risk="high")  # action per tool name
+# or pin every action explicitly:
+safe_tools = wrap_tools(
+    existing_tools,
+    configuration={
+        "refund": {"action": "billing.refund", "risk": "high"},
+    },
+)
 ```
 
 ### Async functions
@@ -150,11 +248,11 @@ would record an outcome before any work runs.
 ### Verifying
 
 ```sh
-guardrail-evidence verify --journal ./journal.jsonl --public-key ./verify_key.pem
-guardrail-evidence audit --journal ./journal.jsonl --public-key ./verify_key.pem
-guardrail-evidence inspect          # what would this journal disclose if shared?
-guardrail-evidence key-info
-guardrail-evidence key-rotate      # replace the signing key; old events stay verifiable
+interceptor verify --journal ./journal.jsonl --public-key ./verify_key.pem
+interceptor audit --journal ./journal.jsonl --public-key ./verify_key.pem
+interceptor inspect          # what would this journal disclose if shared?
+interceptor key-info
+interceptor key-rotate      # replace the signing key; old events stay verifiable
 ```
 
 `verify` checks signatures and the hash chain. Each event must be signed by a
@@ -162,16 +260,17 @@ key the operator trusts: pass `--public-key` (repeatable) to pin specific keys,
 or omit it to use the trusted key set registered in the evidence home
 (`trusted_keys/`). `audit` then pairs every decision
 with its outcome and gives an operational status: `denied`, `succeeded`,
-`failed`, or `needs_reconciliation`. Failed calls and allowed decisions with no
+`failed`, `dry_run`, or `needs_reconciliation`. Failed calls and allowed decisions with no
 outcome make the command exit non-zero: an external side effect may have
 completed before an exception or process death, so the operator must check the
 external system before any retry. It also rejects duplicate outcomes, orphan
-outcomes, outcomes for denied decisions, and identity mismatches between a
-decision and its outcome.
+outcomes, outcomes for denied decisions, identity mismatches between a
+decision and its outcome, and repeated `(action, idempotency_key)` successes
+(`duplicate_idempotency_key`).
 
 ```console
-$ guardrail-evidence audit
-~/.guardrail_evidence/journal.jsonl
+$ interceptor audit
+~/.interceptor/journal.jsonl
   needs_reconciliation     billing.refund
     decision: 4f6a...
   ATTENTION: one or more allowed actions failed or have no outcome.
@@ -204,13 +303,13 @@ alone — every remaining event still chains correctly. The `checkpoint` command
 closes that gap with a signed, durable witness:
 
 ```console
-$ guardrail-evidence checkpoint
-Checkpointed ~/.guardrail_evidence/journal.jsonl
+$ interceptor checkpoint
+Checkpointed ~/.interceptor/journal.jsonl
   events committed: 42
   head sha256:      a1b2...
-  witness:          ~/.guardrail_evidence/journal.jsonl.checkpoint
+  witness:          ~/.interceptor/journal.jsonl.checkpoint
   Keep the witness somewhere the journal cannot reach; verify with
-    guardrail-evidence verify --checkpoint ~/.guardrail_evidence/journal.jsonl.checkpoint
+    interceptor verify --checkpoint ~/.interceptor/journal.jsonl.checkpoint
 ```
 
 The checkpoint event commits to the event count at that moment. Copy the
@@ -228,11 +327,11 @@ explicit seam:
 ```python
 class Registry:
     def contract_declared(self, contract):
-        requests.post(URL, json={"action": contract.action_name,
-                                 "hash": contract.contract_hash})
+        requests.post(URL, json={"action": contract.action_name, "hash": contract.contract_hash})
+
 
 @guard(action="billing.refund", observer=Registry())
-def refund(...): ...
+def refund(order_id: str, amount_cents: int): ...
 ```
 
 Called once per contract version, before approval and before execution, with
@@ -259,9 +358,11 @@ quietly stops recording is worse than one that stops.
   file; anyone who can read it can forge new events. Rotation bounds this
   going forward — old events cannot be forged with a newer key — but not the
   past, and the trusted set authenticates nothing by itself;
-- make anything idempotent. Calls are not deduplicated and failures are not
-  retried, deliberately: retrying a consequential action is the caller's
-  decision.
+- replay results for idempotent calls. `idempotency_key` *blocks* a second
+  execution of a completed key (raising `DuplicateActionError`) but never
+  replays a stored result — results are not stored, and retries after failure
+  are allowed. Cross-process detection scans the file journal; custom
+  `JournalStore`s are covered within the process only.
 
 `ExecutionCompletedEvidenceError` names the one genuinely awkward state — the
 function ran, the outcome could not be recorded — as its own exception type, so
@@ -270,19 +371,25 @@ callers can distinguish it from "did not run" instead of guessing.
 ## Development
 
 ```sh
-pip install -e ".[dev]"
+pip install -e . pytest hypothesis pytest-cov
 pytest
 ruff check .
+ruff format --check .
+mypy
 ```
 
 The suite runs under an autouse fixture that makes socket creation raise, so a
 network call introduced anywhere fails the tests rather than the audit.
+Coverage must stay at or above 85% (`pytest` enforces the gate).
 
 ## Provenance and license
 
-Extracted from an internal agent-action layer and reworked: the fused
-redaction traversal, the observer seam, the tail-read rewrite, and the private
-key permission check are new here. See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
+Renamed to `interceptor` from an internal agent-action layer. New since the
+rename: the fused value-pattern redaction, the `interceptor.policy` providers,
+idempotency keys with `DuplicateActionError`, dry runs with a `dry_run` audit
+status, configuration-free `wrap_tools`, and the weak-reference observer
+tracker — alongside the original fused name redaction, observer seam, tail-read
+journal, and private-key permission check. See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
 and [`docs/EVIDENCE_FORMAT.md`](docs/EVIDENCE_FORMAT.md).
 
 MIT.
