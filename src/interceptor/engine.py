@@ -84,6 +84,7 @@ from .journal import (
     FileJournal,
     JournalStore,
     finalize_event,
+    find_blocking_idempotent_decision,
     find_completed_idempotent_decision,
     new_event_id,
     utc_timestamp,
@@ -143,6 +144,13 @@ def _extract_receipt(
 _COMPLETED_IDEMPOTENCY: set[tuple[str, str, str]] = set()
 _COMPLETED_IDEMPOTENCY_LOCK = threading.Lock()
 
+#: Stable per-store tokens that never reuse ``id()`` addresses. A token is
+#: pinned to the store object itself so a garbage-collected store cannot hand
+#: its identity to a later object allocated at the same address.
+_STORE_TOKENS: dict[int, str] = {}
+_STORE_TOKENS_GUARD = threading.Lock()
+_STORE_TOKEN_COUNTER = 0
+
 
 def _journal_key(store: JournalStore) -> str:
     if isinstance(store, FileJournal):
@@ -150,7 +158,27 @@ def _journal_key(store: JournalStore) -> str:
             return f"file:{store.path.resolve()}"
         except OSError:
             return f"file:{store.path}"
-    return f"store:{id(store)}"
+    try:
+        existing = getattr(store, "__interceptor_store_token__", None)
+        if isinstance(existing, str) and existing:
+            return existing
+    except Exception:  # noqa: S110 - probing for a cached token must not fail
+        pass
+    try:
+        import uuid as _uuid
+
+        token = f"store:{_uuid.uuid4().hex}"
+        try:
+            store.__interceptor_store_token__ = token  # type: ignore[attr-defined]
+        except Exception:
+            global _STORE_TOKEN_COUNTER
+            with _STORE_TOKENS_GUARD:
+                _STORE_TOKEN_COUNTER += 1
+                token = f"store:unattached-{_STORE_TOKEN_COUNTER}"
+                _STORE_TOKENS[id(store)] = token
+        return token
+    except Exception:
+        return f"store:{type(store).__name__}:{id(store)}"
 
 
 def _mark_completed(store: JournalStore, action_name: str, idempotency_key: str) -> None:
@@ -400,35 +428,62 @@ def _prepare_execution(
     active_identity = identity or LocalSigningIdentity.load_or_create()
     store = _resolve_journal(journal)
 
-    # 5. Duplicate check, before approval so duplicates never prompt.
+    def _duplicate_extra(prior_id: str | None) -> dict[str, Any]:
+        extra: dict[str, Any] = {
+            "decision": DECISION_DENIED,
+            "risk": contract.risk,
+            "approval_mode": contract.approval_mode,
+            "redacted_input_summary": input_summary,
+            "parameter_retention": _parameter_retention(canonical_input),
+            "input_hash": input_hash,
+            "idempotency_key": resolved_key,
+            "approval_reason": "duplicate idempotency key; already reserved or completed",
+        }
+        if prior_id is not None:
+            extra["duplicate_of"] = prior_id
+        if canonical_metadata is not None:
+            extra["metadata"] = canonical_metadata
+        return extra
+
+    # 5. Duplicate pre-check, before approval so obvious duplicates never prompt.
+    # Blocking covers succeeded outcomes AND in-progress allowed decisions (no
+    # outcome yet), so concurrent duplicates cannot both execute. Failed and
+    # dry-run decisions never block. The authoritative check is atomic under
+    # file lock after approval (step 7); this pre-check is best-effort UX.
     if resolved_key is not None:
-        prior_id: str | None = None
+        pre_prior_id: str | None = None
         if _is_completed(store, contract.action_name, resolved_key):
-            prior_id = None
+            pre_prior_id = None
         elif isinstance(store, FileJournal):
-            prior = find_completed_idempotent_decision(
-                store.path, contract.action_name, resolved_key
-            )
-            if prior is not None:
-                prior_id = str(prior.get("event_id"))
+            try:
+                completed = find_completed_idempotent_decision(
+                    store.path, contract.action_name, resolved_key
+                )
+            except Exception:
+                completed = None
+            if completed is not None:
+                raw_id = completed.get("event_id")
+                pre_prior_id = raw_id if isinstance(raw_id, str) else None
                 _mark_completed(store, contract.action_name, resolved_key)
-        if prior_id is not None or _is_completed(store, contract.action_name, resolved_key):
-            duplicate_extra: dict[str, Any] = {
-                "decision": DECISION_DENIED,
-                "risk": contract.risk,
-                "approval_mode": contract.approval_mode,
-                "redacted_input_summary": input_summary,
-                "parameter_retention": _parameter_retention(canonical_input),
-                "input_hash": input_hash,
-                "idempotency_key": resolved_key,
-                "approval_reason": "duplicate idempotency key; already completed",
-            }
-            if prior_id is not None:
-                duplicate_extra["duplicate_of"] = prior_id
-            if canonical_metadata is not None:
-                duplicate_extra["metadata"] = canonical_metadata
-            _append_event(store, active_identity, contract, EVENT_TYPE_DECISION, duplicate_extra)
-            raise DuplicateActionError(contract.action_name, resolved_key, prior_id)
+            else:
+                try:
+                    blocking = find_blocking_idempotent_decision(
+                        store.path, contract.action_name, resolved_key
+                    )
+                except Exception:
+                    blocking = None
+                if blocking is not None:
+                    raw_id = blocking.get("event_id")
+                    pre_prior_id = raw_id if isinstance(raw_id, str) else None
+        if pre_prior_id is not None or _is_completed(store, contract.action_name, resolved_key):
+            _append_event(
+                store,
+                active_identity,
+                contract,
+                EVENT_TYPE_DECISION,
+                _duplicate_extra(pre_prior_id),
+            )
+            raise DuplicateActionError(contract.action_name, resolved_key, pre_prior_id)
 
     # 6. Approval.
     request = ApprovalRequest(
@@ -442,32 +497,99 @@ def _prepare_execution(
     decision = _evaluate_approval(request, contract, approval_provider)
 
     # 7. Signed decision event, durably appended BEFORE execution.
-    decision_payload_extra: dict[str, Any] = {
-        "decision": decision.decision,
-        "risk": contract.risk,
-        "approval_mode": contract.approval_mode,
-        "redacted_input_summary": input_summary,
-        "parameter_retention": _parameter_retention(canonical_input),
-        "input_hash": input_hash,
-        "approval_reason": scrub_text(decision.reason, redacted_values, patterns),
-    }
-    if decision.approved_by:
-        decision_payload_extra["approved_by"] = scrub_text(
-            decision.approved_by, redacted_values, patterns, max_chars=120
+    # For file journals with an idempotency key, the blocking re-check and the
+    # append happen under one OS file lock: only the first concurrent racer
+    # appends ``allowed``; the loser appends a denied duplicate and raises.
+    def _allowed_extra() -> dict[str, Any]:
+        extra: dict[str, Any] = {
+            "decision": decision.decision,
+            "risk": contract.risk,
+            "approval_mode": contract.approval_mode,
+            "redacted_input_summary": input_summary,
+            "parameter_retention": _parameter_retention(canonical_input),
+            "input_hash": input_hash,
+            "approval_reason": scrub_text(decision.reason, redacted_values, patterns),
+        }
+        if decision.approved_by:
+            extra["approved_by"] = scrub_text(
+                decision.approved_by, redacted_values, patterns, max_chars=120
+            )
+        if resolved_key is not None:
+            extra["idempotency_key"] = resolved_key
+        if dry_run:
+            extra["dry_run"] = True
+        if canonical_metadata is not None:
+            extra["metadata"] = canonical_metadata
+        return extra
+
+    decision_event: dict[str, Any]
+    if resolved_key is not None and isinstance(store, FileJournal):
+
+        def _build_atomic(
+            previous_hash: str | None, blocking_prior_id: str | None
+        ) -> dict[str, Any]:
+            # Re-check the in-process set inside the file lock (double-checked).
+            in_process_blocked = _is_completed(store, contract.action_name, resolved_key)
+            effective_prior = blocking_prior_id
+            if effective_prior is None and in_process_blocked:
+                effective_prior = None
+            if effective_prior is not None or in_process_blocked:
+                payload: dict[str, Any] = {
+                    "schema_version": EVENT_SCHEMA_VERSION,
+                    "event_type": EVENT_TYPE_DECISION,
+                    "event_id": new_event_id(),
+                    "action_id": contract.action_id,
+                    "action_name": contract.action_name,
+                    "contract_hash": contract.contract_hash,
+                    "timestamp_utc": utc_timestamp(),
+                    "key_id": active_identity.key_id,
+                    "previous_event_hash": previous_hash,
+                }
+                payload.update(_duplicate_extra(effective_prior))
+                return finalize_event(payload, active_identity.sign)
+            payload = {
+                "schema_version": EVENT_SCHEMA_VERSION,
+                "event_type": EVENT_TYPE_DECISION,
+                "event_id": new_event_id(),
+                "action_id": contract.action_id,
+                "action_name": contract.action_name,
+                "contract_hash": contract.contract_hash,
+                "timestamp_utc": utc_timestamp(),
+                "key_id": active_identity.key_id,
+                "previous_event_hash": previous_hash,
+            }
+            payload.update(_allowed_extra())
+            return finalize_event(payload, active_identity.sign)
+
+        decision_event = store.append_event_atomic(
+            _build_atomic,
+            action_name=contract.action_name,
+            idempotency_key=resolved_key,
         )
-    if resolved_key is not None:
-        decision_payload_extra["idempotency_key"] = resolved_key
-    if dry_run:
-        decision_payload_extra["dry_run"] = True
-    if canonical_metadata is not None:
-        decision_payload_extra["metadata"] = canonical_metadata
-    decision_event = _append_event(
-        store,
-        active_identity,
-        contract,
-        EVENT_TYPE_DECISION,
-        decision_payload_extra,
-    )
+        if decision_event.get("decision") == DECISION_DENIED and decision_event.get(
+            "approval_reason"
+        ) == _duplicate_extra(None).get("approval_reason"):
+            raise DuplicateActionError(
+                contract.action_name,
+                resolved_key,
+                decision_event.get("duplicate_of")
+                if isinstance(decision_event.get("duplicate_of"), str)
+                else None,
+            )
+    else:
+        # Non-file stores: close the thread race with a post-approval check.
+        if resolved_key is not None and _is_completed(store, contract.action_name, resolved_key):
+            _append_event(
+                store, active_identity, contract, EVENT_TYPE_DECISION, _duplicate_extra(None)
+            )
+            raise DuplicateActionError(contract.action_name, resolved_key, None)
+        decision_event = _append_event(
+            store,
+            active_identity,
+            contract,
+            EVENT_TYPE_DECISION,
+            _allowed_extra(),
+        )
 
     if not decision.allowed:
         raise ActionDenied(
