@@ -206,6 +206,50 @@ class FileJournal:
                 raise JournalError(f"cannot read journal {self._path}: {exc}") from exc
             return count, previous_hash
 
+    def append_event_atomic(
+        self,
+        build: Callable[[str | None, str | None], dict[str, Any]],
+        *,
+        action_name: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Check idempotency and append one event under a single file lock.
+
+        The blocking-prior scan, the tail-hash read, and the append happen
+        under the same OS file lock, so two processes racing with the same
+        ``(action_name, idempotency_key)`` cannot both append an ``allowed``
+        decision. ``build`` receives ``(previous_hash, blocking_prior_id)``
+        and returns the fully signed event; the caller decides whether a
+        non-None ``blocking_prior_id`` means a denied duplicate.
+        """
+        with self._lock:
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._path, "a+b") as handle:
+                    _lock_file(handle)
+                    try:
+                        blocking: str | None = None
+                        if action_name is not None and idempotency_key is not None:
+                            blocking = _scan_blocking_idempotent(
+                                handle, action_name, idempotency_key
+                            )
+                        previous_hash = _read_last_event_hash(handle)
+                        event = build(previous_hash, blocking)
+                        line = json.dumps(
+                            event, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                        )
+                        handle.seek(0, io.SEEK_END)
+                        handle.write(line.encode("utf-8") + b"\n")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    finally:
+                        _unlock_file(handle)
+            except JournalError:
+                raise
+            except OSError as exc:
+                raise JournalError(f"cannot append to journal {self._path}: {exc}") from exc
+            return event
+
 
 #: How much of the file tail to read when looking for the last complete line.
 #: Comfortably larger than any single event, and re-read in multiples when a
@@ -323,6 +367,109 @@ def find_completed_idempotent_decision(
         ):
             return event
     return None
+
+
+def _blocking_prior_from_state(
+    decisions: dict[str, dict[str, Any]],
+    outcomes_by_decision: dict[str, list[dict[str, Any]]],
+    action_name: str,
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    """Prior decision blocking a new execution, or None.
+
+    Blocking means an ``allowed`` decision with the same action+key whose
+    outcome is missing (in-progress, possibly crashed) or ``succeeded``.
+    ``failed`` outcomes, ``denied`` decisions, and ``dry_run`` decisions never
+    block — retries after failure stay allowed. Returns the earliest blocking
+    decision so ``duplicate_of`` points at the original reservation.
+    """
+    for event_id, event in decisions.items():
+        if (
+            event.get("decision") != "allowed"
+            or event.get("action_name") != action_name
+            or event.get("idempotency_key") != idempotency_key
+            or event.get("dry_run") is True
+        ):
+            continue
+        linked = outcomes_by_decision.get(event_id, [])
+        if not linked:
+            return event
+        if any(outcome.get("status") == "succeeded" for outcome in linked):
+            return event
+        # Only failed outcomes linked: retry is safe.
+    return None
+
+
+def _scan_blocking_idempotent(
+    handle: io.BufferedRandom, action_name: str, idempotency_key: str
+) -> str | None:
+    """Blocking prior decision ``event_id`` visible from *handle*, or None.
+
+    Reads from the start of the already-locked handle; corrupt lines are
+    skipped (chain integrity is verified separately).
+    """
+    decisions: dict[str, dict[str, Any]] = {}
+    outcomes: dict[str, list[dict[str, Any]]] = {}
+    handle.seek(0)
+    for raw in handle:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("event_type") == "decision":
+            event_id = event.get("event_id")
+            if isinstance(event_id, str) and event_id not in decisions:
+                decisions[event_id] = event
+        elif event.get("event_type") == "outcome":
+            ref = event.get("decision_event_id")
+            if isinstance(ref, str):
+                outcomes.setdefault(ref, []).append(event)
+    prior = _blocking_prior_from_state(decisions, outcomes, action_name, idempotency_key)
+    if prior is None:
+        return None
+    prior_id = prior.get("event_id")
+    return prior_id if isinstance(prior_id, str) else None
+
+
+def find_blocking_idempotent_decision(
+    path: Path, action_name: str, idempotency_key: str
+) -> dict[str, Any] | None:
+    """Best-effort pre-check: prior allowed decision blocking a retry.
+
+    Unlocked (for avoiding an approval prompt); the authoritative check is
+    :meth:`FileJournal.append_event_atomic` under lock. Returns the prior
+    decision event, or None.
+    """
+    decisions: dict[str, dict[str, Any]] = {}
+    outcomes: dict[str, list[dict[str, Any]]] = {}
+    try:
+        with open(path, "rb") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("event_type") == "decision":
+                    event_id = event.get("event_id")
+                    if isinstance(event_id, str) and event_id not in decisions:
+                        decisions[event_id] = event
+                elif event.get("event_type") == "outcome":
+                    ref = event.get("decision_event_id")
+                    if isinstance(ref, str):
+                        outcomes.setdefault(ref, []).append(event)
+    except OSError:
+        return None
+    return _blocking_prior_from_state(decisions, outcomes, action_name, idempotency_key)
 
 
 def _read_last_event_hash_scan(handle: io.BufferedRandom) -> str | None:
