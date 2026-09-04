@@ -174,12 +174,16 @@ class CachedApprovalProvider:
         ttl_seconds: float,
         *,
         clock: Callable[[], float] | None = None,
+        max_entries: int = 1024,
     ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
+        if max_entries <= 0:
+            raise ValueError("max_entries must be positive")
         self._inner = inner
         self._ttl = ttl_seconds
         self._clock = clock or time.monotonic
+        self._max_entries = max_entries
         self._lock = threading.Lock()
         self._cache: dict[tuple[str, str], float] = {}
 
@@ -192,10 +196,24 @@ class CachedApprovalProvider:
                 return ApprovalDecision(DECISION_ALLOWED, "allowed by cached approval")
             if expires is not None:
                 del self._cache[key]
+            # Opportunistic sweep so expired entries cannot accumulate.
+            if len(self._cache) >= self._max_entries:
+                expired = [k for k, exp in self._cache.items() if exp <= now]
+                for k in expired:
+                    del self._cache[k]
+            while len(self._cache) >= self._max_entries:
+                # Dicts preserve insertion order: evict the oldest entry.
+                self._cache.pop(next(iter(self._cache)))
         decision = self._inner.decide(request)
         if decision.allowed:
             with self._lock:
                 self._cache[key] = self._clock() + self._ttl
+                if len(self._cache) > self._max_entries:
+                    expired_now = self._clock()
+                    for k in [k for k, exp in self._cache.items() if exp <= expired_now]:
+                        del self._cache[k]
+                    while len(self._cache) > self._max_entries:
+                        self._cache.pop(next(iter(self._cache)))
         return decision
 
 
@@ -206,13 +224,22 @@ class TimeoutApprovalProvider:
     (fail closed). The inner call may still complete later with no effect.
     """
 
-    def __init__(self, inner: ApprovalProvider, timeout_seconds: float) -> None:
+    def __init__(
+        self, inner: ApprovalProvider, timeout_seconds: float, *, max_in_flight: int = 32
+    ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if max_in_flight <= 0:
+            raise ValueError("max_in_flight must be positive")
         self._inner = inner
         self._timeout = timeout_seconds
+        self._in_flight_guard = threading.Semaphore(max_in_flight)
 
     def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        if not self._in_flight_guard.acquire(blocking=False):
+            return ApprovalDecision(
+                DECISION_DENIED, "approval overloaded; failing closed (too many pending)"
+            )
         result: dict[str, Any] = {}
         done = threading.Event()
 
@@ -225,6 +252,7 @@ class TimeoutApprovalProvider:
                 )
             finally:
                 done.set()
+                self._in_flight_guard.release()
 
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
