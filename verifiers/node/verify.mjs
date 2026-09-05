@@ -30,6 +30,7 @@ const KNOWN_TYPES = new Set([
   "resolution",
   "countersignature",
   "archive",
+  "rotation",
 ]);
 const SHARED = [
   "schema_version", "event_type", "event_id", "timestamp_utc",
@@ -44,6 +45,7 @@ const REQUIRED = {
   resolution: [...SHARED, ...ACTION, "decision_event_id", "resolution", "note"],
   countersignature: [...SHARED, "checkpoint_event_id", "checkpoint_count", "head_sha256"],
   archive: [...SHARED, "prior_count", "prior_head", "archived_path"],
+  rotation: [...SHARED, "prior_key_id", "successor_key_id", "successor_fingerprint"],
 };
 
 function pyFloat(value) {
