@@ -58,7 +58,8 @@ def test_rotation_keeps_old_evidence_verifiable(evidence_home):
 
     result = verify_journal(journal, trusted)
     assert result.valid, result.issues
-    assert result.events_verified == 8
+    # 8 action events + 1 signed rotation record.
+    assert result.events_verified == 9
 
 
 def test_verifying_with_only_the_new_key_flags_old_events(evidence_home):
