@@ -30,6 +30,7 @@ from .contracts import ActionContract, _build_contract_unchecked, build_contract
 from .engine import (
     IdempotencyKeySpec,
     ReceiptExtractor,
+    SpendExtractor,
     _make_async_wrapper,
     _make_sync_wrapper,
 )
@@ -85,6 +86,7 @@ def guard(
     dry_run: bool = ...,
     idempotency_key: IdempotencyKeySpec = ...,
     receipt_from: ReceiptExtractor = ...,
+    spend_from: SpendExtractor = ...,
 ) -> Callable[[F], F]: ...
 
 
@@ -104,6 +106,7 @@ def guard(
     dry_run: bool = False,
     idempotency_key: IdempotencyKeySpec = None,
     receipt_from: ReceiptExtractor = None,
+    spend_from: SpendExtractor = None,
 ) -> F | Callable[[F], F]:
     """Guard a consequential function (synchronous or asynchronous).
 
@@ -145,6 +148,11 @@ def guard(
             processor's refund id), recorded on the outcome event after the
             same redaction as inputs. Best-effort: extraction errors or
             oversized/non-canonical receipts drop the receipt, never the call.
+        spend_from: A callable taking the bound arguments dict and returning a
+            non-negative int spend in minor units (cents), or None. Recorded
+            on the decision event and visible to approval providers as
+            ``request.spend_cents`` for budget enforcement. Failures fail
+            closed with ``ContractError`` before anything executes.
     """
 
     def decorate(target: F) -> F:
@@ -186,6 +194,7 @@ def guard(
                 dry_run,
                 idempotency_key,
                 receipt_from,
+                spend_from,
             )
         else:
             wrapper = _make_sync_wrapper(
@@ -202,6 +211,7 @@ def guard(
                 dry_run,
                 idempotency_key,
                 receipt_from,
+                spend_from,
             )
 
         functools.update_wrapper(wrapper, target)
