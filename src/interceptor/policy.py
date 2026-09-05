@@ -616,6 +616,200 @@ class FileRateLimitProvider:
         return ApprovalDecision(DECISION_DENIED, "rate-limit state unavailable; failing closed")
 
 
+class SpendingBudgetProvider:
+    """Allow while cumulative declared spend stays within *max_cents*.
+
+    Reads ``request.spend_cents`` (see ``spend_from`` on ``@guard``): each
+    allowed call adds its spend to the total (optionally per action). Calls
+    with no declared spend are denied — an unenforceable budget must fail
+    closed, not silently pass. Thread-safe.
+    """
+
+    def __init__(self, max_cents: int, *, per_action: bool = False) -> None:
+        if max_cents < 0:
+            raise ValueError("max_cents must be non-negative")
+        self._max_cents = max_cents
+        self._per_action = per_action
+        self._lock = threading.Lock()
+        self._total = 0
+        self._per_action_totals: dict[str, int] = {}
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        spend = request.spend_cents
+        if spend is None:
+            return ApprovalDecision(
+                DECISION_DENIED, "no spend declared; spending budget cannot account it"
+            )
+        with self._lock:
+            if self._per_action:
+                used = self._per_action_totals.get(request.action_name, 0)
+                if used + spend > self._max_cents:
+                    return ApprovalDecision(
+                        DECISION_DENIED,
+                        f"spending budget exhausted for {request.action_name!r} "
+                        f"({used}+{spend}>{self._max_cents}c)",
+                    )
+                self._per_action_totals[request.action_name] = used + spend
+                return ApprovalDecision(
+                    DECISION_ALLOWED, f"within spending budget ({used + spend}/{self._max_cents}c)"
+                )
+            if self._total + spend > self._max_cents:
+                return ApprovalDecision(
+                    DECISION_DENIED,
+                    f"spending budget exhausted ({self._total}+{spend}>{self._max_cents}c)",
+                )
+            self._total += spend
+            return ApprovalDecision(
+                DECISION_ALLOWED, f"within spending budget ({self._total}/{self._max_cents}c)"
+            )
+
+
+class FileSpendingBudgetProvider:
+    """Durable spending budget shared across processes and restarts.
+
+    Totals live in *state_path* as JSON (``{"total": C, "per_action": {..}}``),
+    updated under a sidecar lock file. Like :class:`SpendingBudgetProvider`,
+    calls with no declared spend are denied. Corrupt or unwritable state fails
+    closed (deny).
+    """
+
+    def __init__(self, max_cents: int, state_path: str | Path, *, per_action: bool = False) -> None:
+        if max_cents < 0:
+            raise ValueError("max_cents must be non-negative")
+        self._max_cents = max_cents
+        self._state_path = Path(state_path)
+        self._per_action = per_action
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        spend = request.spend_cents
+        if spend is None:
+            return ApprovalDecision(
+                DECISION_DENIED, "no spend declared; spending budget cannot account it"
+            )
+        lock = _state_lock(self._state_path)
+        with lock:
+            try:
+                self._state_path.parent.mkdir(parents=True, exist_ok=True)
+                lockfile = self._state_path.with_name(f"{self._state_path.name}.lock")
+                with open(lockfile, "a+b") as handle:
+                    try:
+                        import fcntl as _fcntl
+
+                        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+                        locked = True
+                    except Exception:
+                        locked = False
+                    try:
+                        state = _read_json_state(self._state_path)
+                        if state is None:
+                            state = {"total": 0, "per_action": {}}
+                        total = state.get("total", 0)
+                        per_action = state.get("per_action", {})
+                        if (
+                            not isinstance(total, int)
+                            or not isinstance(per_action, dict)
+                            or any(not isinstance(v, int) for v in per_action.values())
+                        ):
+                            raise PolicyError(f"policy state {self._state_path} is corrupt")
+                        if self._per_action:
+                            used = per_action.get(request.action_name, 0)
+                            if not isinstance(used, int):
+                                raise PolicyError(f"policy state {self._state_path} is corrupt")
+                            if used + spend > self._max_cents:
+                                return ApprovalDecision(
+                                    DECISION_DENIED,
+                                    f"spending budget exhausted for {request.action_name!r} "
+                                    f"({used}+{spend}>{self._max_cents}c)",
+                                )
+                            per_action[request.action_name] = used + spend
+                            _atomic_write_json(
+                                self._state_path, {"total": total, "per_action": per_action}
+                            )
+                            return ApprovalDecision(
+                                DECISION_ALLOWED,
+                                f"within spending budget ({used + spend}/{self._max_cents}c)",
+                            )
+                        if total + spend > self._max_cents:
+                            return ApprovalDecision(
+                                DECISION_DENIED,
+                                f"spending budget exhausted ({total}+{spend}>{self._max_cents}c)",
+                            )
+                        _atomic_write_json(
+                            self._state_path,
+                            {"total": total + spend, "per_action": per_action},
+                        )
+                        return ApprovalDecision(
+                            DECISION_ALLOWED,
+                            f"within spending budget ({total + spend}/{self._max_cents}c)",
+                        )
+                    finally:
+                        if locked:
+                            try:
+                                import fcntl as _fcntl2
+
+                                _fcntl2.flock(handle.fileno(), _fcntl2.LOCK_UN)
+                            except Exception:  # noqa: S110 - best-effort unlock
+                                pass
+            except PolicyError as exc:
+                return ApprovalDecision(DECISION_DENIED, f"{exc}; failing closed")
+            except OSError as exc:
+                return ApprovalDecision(
+                    DECISION_DENIED, f"spending state unavailable ({exc}); failing closed"
+                )
+        return ApprovalDecision(DECISION_DENIED, "spending state unavailable; failing closed")
+
+
+class AttestedApprovalProvider:
+    """Stamp inner allowances with a verified operator identity.
+
+    The identity comes from *approved_by* or, when None, the
+    *approved_by_env* environment variable (e.g. an OIDC ``sub`` your launcher
+    exports after login). Allowed decisions are re-issued with that identity
+    in ``approved_by`` so the journal says *who* approved; denials pass
+    through unstamped. A missing or malformed identity fails closed (deny):
+    unattributable approval is not approval.
+    """
+
+    def __init__(
+        self,
+        inner: ApprovalProvider,
+        *,
+        approved_by: str | None = None,
+        approved_by_env: str = "INTERCEPTOR_APPROVER",
+    ) -> None:
+        self._inner = inner
+        self._approved_by = approved_by
+        self._approved_by_env = approved_by_env
+
+    def _resolve_identity(self) -> str | None:
+        if self._approved_by is not None:
+            return self._approved_by
+        import os as _os
+
+        value = _os.environ.get(self._approved_by_env)
+        return value if value else None
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        decision = self._inner.decide(request)
+        if not decision.allowed:
+            return decision
+        identity = self._resolve_identity()
+        if identity is None:
+            return ApprovalDecision(
+                DECISION_DENIED, "no approver identity configured; failing closed"
+            )
+        stamped = identity.strip()
+        if (
+            not stamped
+            or len(stamped) > 120
+            or any(char.isspace() or ord(char) < 33 for char in stamped)
+        ):
+            return ApprovalDecision(
+                DECISION_DENIED, "approver identity is malformed; failing closed"
+            )
+        return ApprovalDecision(decision.decision, decision.reason, approved_by=stamped)
+
+
 def load_policy_file(path: str | Path) -> RuleProvider:
     """Load a declarative policy from a JSON file.
 
