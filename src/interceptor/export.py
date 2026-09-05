@@ -67,7 +67,7 @@ def journal_stats(snapshot: JournalSnapshot) -> dict[str, Any]:
     by_action: dict[str, int] = {}
     by_risk: dict[str, int] = {}
     decisions = outcomes = resolutions = countersignatures = checkpoints = 0
-    archives = 0
+    archives = rotations = 0
     for event in snapshot.events:
         event_type = event.get("event_type")
         if event_type == "decision":
@@ -88,6 +88,8 @@ def journal_stats(snapshot: JournalSnapshot) -> dict[str, Any]:
             checkpoints += 1
         elif event_type == "archive":
             archives += 1
+        elif event_type == "rotation":
+            rotations += 1
     return {
         "events": len(snapshot.events),
         "decisions": decisions,
@@ -96,6 +98,7 @@ def journal_stats(snapshot: JournalSnapshot) -> dict[str, Any]:
         "countersignatures": countersignatures,
         "checkpoints": checkpoints,
         "archives": archives,
+        "rotations": rotations,
         "by_action": by_action,
         "by_risk": by_risk,
         "by_outcome_status": by_status,
