@@ -27,7 +27,7 @@ import os
 import stat
 import threading
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -280,20 +280,84 @@ def load_trusted_public_keys(home: Path | None = None) -> tuple[Ed25519PublicKey
     return tuple(keys)
 
 
-def rotate_key(home: Path | None = None) -> LocalSigningIdentity:
+ROTATION_EVENT_TYPE = "rotation"
+
+
+def record_rotation_event(
+    *,
+    prior_key_id: str,
+    sign: Any,
+    successor: Ed25519PublicKey,
+    journal_path: Path,
+    home: Path | None = None,
+) -> dict[str, Any]:
+    """Append a signed key-rotation record to *journal_path*.
+
+    The event is signed by the *prior* (outgoing) key, so a verifier holding
+    the trusted set sees an in-chain authorization: ``prior_key_id`` (== the
+    signing ``key_id``) names its ``successor_key_id`` + full fingerprint.
+    Returns the appended event. Raises :class:`IdentityError` on I/O failure.
+    """
+    from .journal import (
+        EVENT_SCHEMA_VERSION,
+        FileJournal,
+        finalize_event,
+        new_event_id,
+        utc_timestamp,
+    )
+
+    successor_fingerprint = public_key_fingerprint(successor)
+    successor_key_id = key_id_for(successor)
+    store = FileJournal(journal_path)
+
+    def build(previous_hash: str | None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": EVENT_SCHEMA_VERSION,
+            "event_type": ROTATION_EVENT_TYPE,
+            "event_id": new_event_id(),
+            "timestamp_utc": utc_timestamp(),
+            "key_id": prior_key_id,
+            "previous_event_hash": previous_hash,
+            "prior_key_id": prior_key_id,
+            "successor_key_id": successor_key_id,
+            "successor_fingerprint": successor_fingerprint,
+        }
+        return finalize_event(payload, sign)
+
+    try:
+        return store.append_event(build)
+    except Exception as exc:
+        raise IdentityError(f"cannot record key rotation in {journal_path}: {exc}") from exc
+
+
+def rotate_key(
+    home: Path | None = None,
+    *,
+    journal_path: Path | None = None,
+    record: bool = True,
+) -> LocalSigningIdentity:
     """Replace the local signing key and keep the outgoing one trusted.
 
     Generates a new Ed25519 key, overwrites ``signing_key.pem`` and
     ``verify_key.pem``, and registers the new public key in the trusted set.
     The outgoing public key is registered first, so events signed before the
     rotation continue to verify against the default trusted set.
+
+    When *record* is true (default) and a prior key exists, a ``rotation``
+    event signed by the outgoing key is appended to the journal first, so the
+    succession is witnessed in-chain instead of living only in the local
+    ``trusted_keys/`` directory. Pass ``record=False`` for offline/test use.
     """
     home = home or evidence_home()
+    prior_private: Ed25519PrivateKey | None = None
+    prior_key_id: str | None = None
     for candidate in (home / PUBLIC_KEY_FILENAME, home / PRIVATE_KEY_FILENAME):
         try:
             if candidate.name == PRIVATE_KEY_FILENAME and candidate.exists():
                 _require_private_permissions(candidate)
-                register_public_key(_load_private_key(candidate).public_key(), home)
+                prior_private = _load_private_key(candidate)
+                prior_key_id = key_id_for(prior_private.public_key())
+                register_public_key(prior_private.public_key(), home)
             elif candidate.name == PUBLIC_KEY_FILENAME and candidate.exists():
                 register_public_key(load_public_key(candidate), home)
         except (IdentityError, OSError):
@@ -304,6 +368,28 @@ def rotate_key(home: Path | None = None) -> LocalSigningIdentity:
     home.mkdir(parents=True, exist_ok=True)
     _restrict_dir(home)
     new_key = Ed25519PrivateKey.generate()
+
+    if record and prior_private is not None and prior_key_id is not None:
+        target = journal_path or (home / JOURNAL_FILENAME)
+        if target.exists():
+            try:
+                import base64 as _b64
+
+                def _sign(digest: bytes) -> str:
+                    assert prior_private is not None
+                    return _b64.b64encode(prior_private.sign(digest)).decode("ascii")
+
+                record_rotation_event(
+                    prior_key_id=prior_key_id,
+                    sign=_sign,
+                    successor=new_key.public_key(),
+                    journal_path=target,
+                    home=home,
+                )
+            except IdentityError:
+                pass  # rotation must not fail because the witness append failed;
+                # the trusted_keys/ registration below still preserves verifiability.
+
     try:
         _write_private_key(private_path, new_key)
         _write_public_key(public_path, new_key.public_key())
