@@ -15,63 +15,67 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
+          enable-cache: true
 
-      - run: pip install -e . pytest hypothesis pytest-cov
+      # --frozen fails if uv.lock is stale, so dependency changes are
+      # always explicit lockfile diffs in review.
+      - run: uv sync --frozen
 
       # The autouse fixture makes socket creation raise for the whole suite, so
       # a network call introduced anywhere fails here rather than in an audit.
       # addopts in pyproject.toml runs the coverage gate on every invocation.
-      - run: pytest -q
+      - run: uv run --frozen pytest -q
 
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install ruff
-      - run: ruff check .
-      - run: ruff format --check .
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen ruff format --check .
 
   types:
     name: Type check (mypy --strict)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-          cache: pip
+          enable-cache: true
       # The package is installed so mypy resolves the cryptography stubs.
-      - run: pip install -e . mypy
-      - run: mypy
+      - run: uv sync --frozen
+      - run: uv run --frozen mypy
 
   windows:
     name: Windows (file locking differs)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: pip install -e . pytest hypothesis pytest-cov
+          enable-cache: true
+      - run: uv sync --frozen
       # Journal appends use msvcrt locking here and fcntl elsewhere, and the
       # key-permission check is POSIX-only. Both need real coverage.
-      - run: pytest -q
+      - run: uv run --frozen pytest -q
 
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: pip install build twine
-      - run: python -m build
-      - run: twine check dist/*
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv build
+      - run: uvx twine check dist/*
