@@ -1,0 +1,27 @@
+{
+  "expect": {
+    "audit": {
+      "issue_codes": [],
+      "statuses": [
+        "succeeded",
+        "succeeded"
+      ],
+      "structurally_valid": true
+    },
+    "codes": [],
+    "events_verified": 5,
+    "valid": true
+  },
+  "journal": [
+    "{\"action_id\":\"__main__.main.<locals>.act\",\"action_name\":\"vec.act\",\"approval_mode\":\"required\",\"approval_reason\":\"vector allow\",\"contract_hash\":\"6feff1c4eb7ccbce53c4ea345e43ef174228e31f64c716a0719b0da581aa2bff\",\"decision\":\"allowed\",\"event_hash\":\"af4f1af80eb6501cc0ececfbea272da561fc7584e64ea2294b2bcef13dc88fa4\",\"event_id\":\"1ee6a68c-d7ad-405e-a2c5-940385b1ed74\",\"event_type\":\"decision\",\"input_hash\":\"5041bf1f713df204784353e82f6a4a535931cb64f1f4b4a5aeaffcb720918b22\",\"key_id\":\"ed25519:6c48be25b037eebd\",\"parameter_retention\":[{\"name\":\"x\",\"state\":\"retained\"}],\"previous_event_hash\":null,\"redacted_input_summary\":\"x=1\",\"risk\":\"medium\",\"schema_version\":\"1\",\"signature\":\"ShNTCXBir5OFCxW+MhGcAm8LI0fo9jN8RauXvgt/TsgeIqqr6sl/9ccuRSqIkrTr+nenRWwW+xad/33I9yiJAQ==\",\"timestamp_utc\":\"2026-09-05T02:52:46.413031Z\"}",
+    "{\"action_id\":\"__main__.main.<locals>.act\",\"action_name\":\"vec.act\",\"contract_hash\":\"6feff1c4eb7ccbce53c4ea345e43ef174228e31f64c716a0719b0da581aa2bff\",\"decision_event_id\":\"1ee6a68c-d7ad-405e-a2c5-940385b1ed74\",\"event_hash\":\"8f144e2d0e094089ca047c2cdc93aff2858231d9ed8faf9b0cf568dcbf5cfac9\",\"event_id\":\"254c9ec0-ee1a-4802-a4bc-64fa477ef86a\",\"event_type\":\"outcome\",\"key_id\":\"ed25519:6c48be25b037eebd\",\"observed_result_type\":\"builtins.int\",\"previous_event_hash\":\"af4f1af80eb6501cc0ececfbea272da561fc7584e64ea2294b2bcef13dc88fa4\",\"redacted_output_hash\":\"6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b\",\"schema_version\":\"1\",\"signature\":\"Oh1TKEO3crn64pSTjiLWmwGypWEVwnnke18wOrbL7dKkJTAwAL9vXIhvrvnm2+WnctrDoEIYdgYEFVgyGbECCw==\",\"status\":\"succeeded\",\"timestamp_utc\":\"2026-09-05T02:52:46.414412Z\"}",
+    "{\"event_hash\":\"034013b6af09572672ecaba5f92fd21c87b2d637880f6ebe67482876dc08ab67\",\"event_id\":\"43a81566-b694-4196-81d5-a6b25e4ad942\",\"event_type\":\"rotation\",\"key_id\":\"ed25519:6c48be25b037eebd\",\"previous_event_hash\":\"8f144e2d0e094089ca047c2cdc93aff2858231d9ed8faf9b0cf568dcbf5cfac9\",\"prior_key_id\":\"ed25519:6c48be25b037eebd\",\"schema_version\":\"1\",\"signature\":\"/lxHJ6o28cLYPN7JrE64wHU9icpp/lqxxtFMYO5aMgncANpQAyHJOmOnv/THsNxZ0NmLwKVlDFJyOrIY7hezAA==\",\"successor_fingerprint\":\"43ef8dc1bb0afd818a12fce322f370adf06bc4d5266b34014350d6c91ef20fb1\",\"successor_key_id\":\"ed25519:43ef8dc1bb0afd81\",\"timestamp_utc\":\"2026-09-05T02:52:46.419465Z\"}",
+    "{\"action_id\":\"__main__.main.<locals>.act\",\"action_name\":\"vec.act\",\"approval_mode\":\"required\",\"approval_reason\":\"vector allow\",\"contract_hash\":\"6feff1c4eb7ccbce53c4ea345e43ef174228e31f64c716a0719b0da581aa2bff\",\"decision\":\"allowed\",\"event_hash\":\"4056da141a1b34779b971152d7ee0b400240b054a86a76322024f8d6426599b3\",\"event_id\":\"9be5960f-3746-4fd1-b543-ff8c7eb21eb9\",\"event_type\":\"decision\",\"input_hash\":\"5e2b030a4a0f1582d78c0fd9924511cd6b1f2df9879e574f5ea1406c94052418\",\"key_id\":\"ed25519:43ef8dc1bb0afd81\",\"parameter_retention\":[{\"name\":\"x\",\"state\":\"retained\"}],\"previous_event_hash\":\"034013b6af09572672ecaba5f92fd21c87b2d637880f6ebe67482876dc08ab67\",\"redacted_input_summary\":\"x=2\",\"risk\":\"medium\",\"schema_version\":\"1\",\"signature\":\"qsmog4s/vr1UxVl8lZf8tPMlBaU4jbwlQVVv4GtxMAJ7Kqb8sRJAUYkVJ/z6hoWj5TkqZmeCfYyPbhsxDfh7Ag==\",\"timestamp_utc\":\"2026-09-05T02:52:46.421809Z\"}",
+    "{\"action_id\":\"__main__.main.<locals>.act\",\"action_name\":\"vec.act\",\"contract_hash\":\"6feff1c4eb7ccbce53c4ea345e43ef174228e31f64c716a0719b0da581aa2bff\",\"decision_event_id\":\"9be5960f-3746-4fd1-b543-ff8c7eb21eb9\",\"event_hash\":\"70f3e8b0c1bbccaade72938367da186ad80f303585482cd8fad1ebd6449af802\",\"event_id\":\"a8689fd5-cba8-4dec-8de2-b84eb566c204\",\"event_type\":\"outcome\",\"key_id\":\"ed25519:43ef8dc1bb0afd81\",\"observed_result_type\":\"builtins.int\",\"previous_event_hash\":\"4056da141a1b34779b971152d7ee0b400240b054a86a76322024f8d6426599b3\",\"redacted_output_hash\":\"d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35\",\"schema_version\":\"1\",\"signature\":\"ttqtegUJJkMAMRspT4axqXlY3rVPxlcS6Vo/guL2sznbxIy1nhHYCQO34N2D2rUsI0zfg6vVObLDlOPjVPoZAw==\",\"status\":\"succeeded\",\"timestamp_utc\":\"2026-09-05T02:52:46.422555Z\"}"
+  ],
+  "name": "rotation",
+  "public_keys": [
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAIw4W5o+Ab0qvZr00ixZ/mG5FRNI4BxIcgbhd+MFkWIk=\n-----END PUBLIC KEY-----\n",
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfhBzLoNIxuYdr6uQms38RRVL2r6F5rcowGr6RtLlMUA=\n-----END PUBLIC KEY-----\n"
+  ]
+}
