@@ -39,6 +39,7 @@ class ApprovalRequest:
     redacted_input_summary: str
     input_hash: str
     contract_hash: str
+    spend_cents: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
