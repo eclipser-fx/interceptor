@@ -152,12 +152,32 @@ _STORE_TOKENS_GUARD = threading.Lock()
 _STORE_TOKEN_COUNTER = 0
 
 
+def _store_path(store: JournalStore) -> Path | None:
+    """Filesystem path behind *store*, or None for non-file stores."""
+    try:
+        path = store.path
+    except Exception:
+        return None
+    return path if isinstance(path, Path) else None
+
+
+def _has_atomic_append(store: JournalStore) -> bool:
+    """Whether *store* supports reservation under one file lock."""
+    return callable(getattr(store, "append_event_atomic", None))
+
+
 def _journal_key(store: JournalStore) -> str:
-    if isinstance(store, FileJournal):
+    path = _store_path(store)
+    if path is not None and isinstance(store, (FileJournal,)):
         try:
-            return f"file:{store.path.resolve()}"
+            return f"file:{path.resolve()}"
         except OSError:
-            return f"file:{store.path}"
+            return f"file:{path}"
+    if path is not None and _has_atomic_append(store):
+        try:
+            return f"file:{path.resolve()}"
+        except OSError:
+            return f"file:{path}"
     try:
         existing = getattr(store, "__interceptor_store_token__", None)
         if isinstance(existing, str) and existing:
@@ -452,12 +472,13 @@ def _prepare_execution(
     # file lock after approval (step 7); this pre-check is best-effort UX.
     if resolved_key is not None:
         pre_prior_id: str | None = None
+        store_path = _store_path(store)
         if _is_completed(store, contract.action_name, resolved_key):
             pre_prior_id = None
-        elif isinstance(store, FileJournal):
+        elif store_path is not None:
             try:
                 completed = find_completed_idempotent_decision(
-                    store.path, contract.action_name, resolved_key
+                    store_path, contract.action_name, resolved_key
                 )
             except Exception:
                 completed = None
@@ -468,7 +489,7 @@ def _prepare_execution(
             else:
                 try:
                     blocking = find_blocking_idempotent_decision(
-                        store.path, contract.action_name, resolved_key
+                        store_path, contract.action_name, resolved_key
                     )
                 except Exception:
                     blocking = None
@@ -523,7 +544,7 @@ def _prepare_execution(
         return extra
 
     decision_event: dict[str, Any]
-    if resolved_key is not None and isinstance(store, FileJournal):
+    if resolved_key is not None and _has_atomic_append(store):
 
         def _build_atomic(
             previous_hash: str | None, blocking_prior_id: str | None
@@ -561,7 +582,8 @@ def _prepare_execution(
             payload.update(_allowed_extra())
             return finalize_event(payload, active_identity.sign)
 
-        decision_event = store.append_event_atomic(
+        atomic_store: Any = store
+        decision_event = atomic_store.append_event_atomic(
             _build_atomic,
             action_name=contract.action_name,
             idempotency_key=resolved_key,
