@@ -61,7 +61,7 @@ Every event carries:
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | string | `"1"` |
-| `event_type` | string | `"decision"`, `"outcome"`, `"checkpoint"`, `"resolution"`, `"countersignature"`, or `"archive"` |
+| `event_type` | string | `"decision"`, `"outcome"`, `"checkpoint"`, `"resolution"`, `"countersignature"`, `"archive"`, or `"rotation"` |
 | `event_id` | string | UUIDv4 |
 | `action_id` | string | `module.qualified_name` (absent on `checkpoint`/`countersignature`) |
 | `action_name` | string | declared logical name (absent on `checkpoint`/`countersignature`) |
@@ -157,6 +157,15 @@ not an action):
 The referenced checkpoint must appear earlier in the same journal; the
 countersignature is signed by a second key and verified against the same
 trusted keyring.
+
+`rotation` events have no action fields. They witness a key succession
+in-chain, signed by the outgoing key:
+
+| Field | Type |
+|---|---|
+| `prior_key_id` | must equal the signing `key_id` |
+| `successor_key_id` | `ed25519:` + first 16 hex of the successor fingerprint |
+| `successor_fingerprint` | full 64-char lowercase hex SHA-256 of the successor raw key |
 
 `archive` events have no action fields and must be the first line of their
 file. They link a rotated successor back to its predecessor:
