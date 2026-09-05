@@ -35,7 +35,13 @@ from .approval import (
     TerminalApprovalProvider,
 )
 from .approve_server import ApprovalServer, ServerApprovalProvider
-from .archive import ArchiveReport, archive_journal
+from .archive import (
+    ArchiveChainIssue,
+    ArchiveChainReport,
+    ArchiveReport,
+    archive_journal,
+    verify_archive_chain,
+)
 from .audit import (
     AuditedInvocation,
     AuditIssue,
@@ -91,8 +97,15 @@ from .identity import (
     generate_private_key,
     load_private_key,
     load_public_key,
+    record_rotation_event,
+    rotate_key,
 )
-from .journal import FileJournal, JournalStore, find_completed_idempotent_decision
+from .journal import (
+    FileJournal,
+    JournalStore,
+    find_blocking_idempotent_decision,
+    find_completed_idempotent_decision,
+)
 from .observer import ActionObserver
 from .policy import (
     AllOf,
@@ -101,6 +114,8 @@ from .policy import (
     BudgetProvider,
     CachedApprovalProvider,
     CombinedProvider,
+    FileBudgetProvider,
+    FileRateLimitProvider,
     PredicateProvider,
     QuorumApprovalProvider,
     RateLimitProvider,
@@ -129,6 +144,7 @@ from .resolve import (
     resolve_journal,
 )
 from .schemas import as_openai_tool, describe_tool, mcp_tool
+from .shipping import CallableSink, EventSink, FanoutJournalStore, FileMirrorSink
 from .verification import VerificationIssue, VerificationResult, verify_journal
 from .wrap_tool import wrap_tool, wrap_tools
 
@@ -171,6 +187,8 @@ __all__ = [
     "ApprovalRequest",
     "ApprovalServer",
     "ApprovalUnavailableError",
+    "ArchiveChainIssue",
+    "ArchiveChainReport",
     "ArchiveError",
     "ArchiveReport",
     "AuditIssue",
@@ -179,6 +197,7 @@ __all__ = [
     "AutoAllowProvider",
     "BudgetProvider",
     "CachedApprovalProvider",
+    "CallableSink",
     "CanonicalizationError",
     "Canonicalized",
     "CheckpointReport",
@@ -188,13 +207,18 @@ __all__ = [
     "CountersignatureReport",
     "DuplicateActionError",
     "EphemeralSigningIdentity",
+    "EventSink",
     "EvidenceAuditError",
     "EvidenceIncompleteError",
     "EvidencePersistenceError",
     "EvidencePrivacyInspectionError",
     "EvidencePrivacyReport",
     "ExecutionCompletedEvidenceError",
+    "FanoutJournalStore",
+    "FileBudgetProvider",
     "FileJournal",
+    "FileMirrorSink",
+    "FileRateLimitProvider",
     "IdempotencyKeySpec",
     "IdentityError",
     "InterceptorError",
@@ -237,6 +261,7 @@ __all__ = [
     "describe_tool",
     "evidence_home",
     "export_journal",
+    "find_blocking_idempotent_decision",
     "find_completed_idempotent_decision",
     "generate_private_key",
     "guard",
@@ -246,10 +271,13 @@ __all__ = [
     "load_private_key",
     "load_public_key",
     "mcp_tool",
+    "record_rotation_event",
     "render_html",
     "reset_idempotency_state",
     "resolve_journal",
+    "rotate_key",
     "value_matches_patterns",
+    "verify_archive_chain",
     "verify_journal",
     "wrap_tool",
     "wrap_tools",
