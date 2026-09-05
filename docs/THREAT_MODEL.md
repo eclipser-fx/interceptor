@@ -233,5 +233,11 @@ In rough order of value per unit of work:
 4. **Signed rotation records.** The trusted set today is local operator state;
    a signed, witnessed rotation event would let a compromise of the *current*
    key have a cleanly bounded blast radius instead of an operator-managed one.
+   (Implemented: `key-rotate` appends a `rotation` event signed by the outgoing
+   key naming its successor; verification checks the linkage. The trusted set
+   itself is still local operator state — pin keys out of band.)
 
-Items 3 and 4 are not implemented.
+Item 3 is not implemented. Continuous remote shipping is partially addressed:
+`FanoutJournalStore` + `FileMirrorSink` mirror every event to witness sinks as
+written (fail-closed by default), and `verify-chain` checks custody across
+`archive` rotations — but operating the remote witness itself remains yours.
