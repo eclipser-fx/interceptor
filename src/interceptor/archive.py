@@ -28,6 +28,161 @@ ARCHIVE_EVENT_TYPE = "archive"
 
 
 @dataclasses.dataclass(frozen=True)
+class ArchiveChainIssue:
+    file: str
+    code: str
+    message: str
+
+
+@dataclasses.dataclass(frozen=True)
+class ArchiveChainReport:
+    valid: bool
+    files_checked: tuple[str, ...]
+    issues: tuple[ArchiveChainIssue, ...]
+
+
+def verify_archive_chain(
+    live_path: str | Path,
+    public_keys: Any,
+    *,
+    max_links: int = 1024,
+) -> ArchiveChainReport:
+    """Verify the live journal plus every archived predecessor it links to.
+
+    Each successor's first event is an ``archive`` record committing to the
+    predecessor's ``(count, head)``. This walks those links backwards: every
+    file must verify standalone, the predecessor file must exist beside the
+    successor, and its actual ``(count, head)`` must equal the committed link.
+    A missing predecessor, a count/head mismatch, or a cycle fails the chain.
+    """
+    from .verification import verify_journal
+
+    live = Path(live_path)
+    files_checked: list[str] = []
+    issues: list[ArchiveChainIssue] = []
+    seen: set[str] = set()
+    current = live
+    links = 0
+    while True:
+        try:
+            key = str(current.resolve())
+        except OSError:
+            key = str(current)
+        if key in seen:
+            issues.append(ArchiveChainIssue(str(current), "archive_cycle", "archive chain loops"))
+            break
+        seen.add(key)
+        if not current.exists():
+            issues.append(
+                ArchiveChainIssue(
+                    str(current), "archive_missing", "archived predecessor file is missing"
+                )
+            )
+            break
+        result = verify_journal(current, public_keys)
+        files_checked.append(str(current))
+        if not result.valid:
+            first = result.issues[0] if result.issues else None
+            detail = f" [{first.code}] {first.message}" if first is not None else ""
+            issues.append(
+                ArchiveChainIssue(
+                    str(current), "archive_invalid", f"file fails verification{detail}"
+                )
+            )
+            break
+        # Read the first non-blank line to find the link (if any).
+        first_event: dict[str, Any] | None = None
+        try:
+            import json as _json
+
+            with open(current, "rb") as handle:
+                for raw in handle:
+                    if raw.strip():
+                        parsed = _json.loads(raw.decode("utf-8"))
+                        first_event = parsed if isinstance(parsed, dict) else None
+                        break
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            issues.append(
+                ArchiveChainIssue(str(current), "archive_unreadable", f"cannot read file: {exc}")
+            )
+            break
+        if first_event is None or first_event.get("event_type") != ARCHIVE_EVENT_TYPE:
+            break  # genesis file: chain complete.
+        if links >= max_links:
+            issues.append(
+                ArchiveChainIssue(str(current), "archive_too_deep", "archive chain too long")
+            )
+            break
+        archived_name = first_event.get("archived_path")
+        prior_count = first_event.get("prior_count")
+        prior_head = first_event.get("prior_head")
+        if not isinstance(archived_name, str) or "/" in archived_name or "\\" in archived_name:
+            issues.append(
+                ArchiveChainIssue(
+                    str(current), "archive_bad_link", "archived_path must be a bare file name"
+                )
+            )
+            break
+        predecessor = current.parent / archived_name
+        if not predecessor.exists():
+            issues.append(
+                ArchiveChainIssue(
+                    str(predecessor), "archive_missing", "archived predecessor file is missing"
+                )
+            )
+            break
+        # Check the predecessor's actual (count, head) against the commitment.
+        try:
+            import json as _json2
+
+            count = 0
+            head: str | None = None
+            with open(predecessor, "rb") as handle:
+                for raw in handle:
+                    if not raw.strip():
+                        continue
+                    count += 1
+                    try:
+                        parsed = _json2.loads(raw.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    h = parsed.get("event_hash") if isinstance(parsed, dict) else None
+                    if isinstance(h, str):
+                        head = h
+        except OSError as exc:
+            issues.append(
+                ArchiveChainIssue(
+                    str(predecessor), "archive_unreadable", f"cannot read file: {exc}"
+                )
+            )
+            break
+        if not isinstance(prior_count, int) or count != prior_count:
+            issues.append(
+                ArchiveChainIssue(
+                    str(current),
+                    "archive_count_mismatch",
+                    f"archive commits to count {prior_count!r} but {predecessor.name} "
+                    f"holds {count} events",
+                )
+            )
+            break
+        if head != prior_head:
+            issues.append(
+                ArchiveChainIssue(
+                    str(current),
+                    "archive_head_mismatch",
+                    "archive prior_head does not match the predecessor's last event_hash",
+                )
+            )
+            break
+        current = predecessor
+        links += 1
+    return ArchiveChainReport(
+        valid=not issues, files_checked=tuple(files_checked), issues=tuple(issues)
+    )
+
+
+@dataclasses.dataclass(frozen=True)
 class ArchiveReport:
     journal_path: Path
     archived_path: Path
