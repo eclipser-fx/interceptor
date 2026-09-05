@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import threading
 import time
 from collections import deque
@@ -404,6 +405,215 @@ class RuleProvider:
         if self._default == DECISION_ALLOWED:
             return ApprovalDecision(DECISION_ALLOWED, "allowed by policy default")
         return ApprovalDecision(DECISION_DENIED, "no policy rule matched; default deny")
+
+
+#: Per-state-file in-process locks, so threads in one process serialize
+#: around the same OS file lock acquisition.
+_STATE_LOCKS: dict[str, threading.Lock] = {}
+_STATE_LOCKS_GUARD = threading.Lock()
+
+
+def _state_lock(path: Path) -> threading.Lock:
+    try:
+        key = str(path.resolve())
+    except OSError:
+        key = str(path)
+    with _STATE_LOCKS_GUARD:
+        return _STATE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write *payload* atomically (tmp + fsync + replace)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    with open(tmp, "wb") as handle:
+        handle.write(data + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
+def _read_json_state(path: Path) -> dict[str, Any] | None:
+    """Parse the JSON state file, or None when missing/empty. Raises on corruption."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise PolicyError(f"policy state {path} is corrupt: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise PolicyError(f"policy state {path} is corrupt: expected an object")
+    return parsed
+
+
+class FileBudgetProvider:
+    """Durable budget: at most *max_calls* invocations, surviving restarts.
+
+    State lives in *state_path* as JSON (``{"total": N, "per_action": {..}}``),
+    updated under an OS file lock so concurrent processes share one budget.
+    Counts every ``decide`` that reaches this provider, like
+    :class:`BudgetProvider`. Corrupt or unwritable state fails closed (deny).
+    """
+
+    def __init__(self, max_calls: int, state_path: str | Path, *, per_action: bool = False) -> None:
+        if max_calls < 0:
+            raise ValueError("max_calls must be non-negative")
+        self._max_calls = max_calls
+        self._state_path = Path(state_path)
+        self._per_action = per_action
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        lock = _state_lock(self._state_path)
+        with lock:
+            try:
+                self._state_path.parent.mkdir(parents=True, exist_ok=True)
+                # Lock a stable sidecar so the atomic replace of the state file
+                # cannot drop mutual exclusion mid-update.
+                lockfile = self._state_path.with_name(f"{self._state_path.name}.lock")
+                with open(lockfile, "a+b") as handle:
+                    try:
+                        import fcntl as _fcntl
+
+                        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+                        locked = True
+                    except Exception:
+                        locked = False
+                    try:
+                        state = _read_json_state(self._state_path)
+                        if state is None:
+                            state = {"total": 0, "per_action": {}}
+                        total = state.get("total", 0)
+                        per_action = state.get("per_action", {})
+                        if not isinstance(total, int) or not isinstance(per_action, dict):
+                            raise PolicyError(f"policy state {self._state_path} is corrupt")
+                        if self._per_action:
+                            used = per_action.get(request.action_name, 0)
+                            if not isinstance(used, int):
+                                raise PolicyError(f"policy state {self._state_path} is corrupt")
+                            if used >= self._max_calls:
+                                return ApprovalDecision(
+                                    DECISION_DENIED,
+                                    f"budget exhausted for {request.action_name!r} "
+                                    f"({used}/{self._max_calls})",
+                                )
+                            per_action[request.action_name] = used + 1
+                            _atomic_write_json(
+                                self._state_path, {"total": total, "per_action": per_action}
+                            )
+                            return ApprovalDecision(
+                                DECISION_ALLOWED,
+                                f"within budget ({used + 1}/{self._max_calls})",
+                            )
+                        if total >= self._max_calls:
+                            return ApprovalDecision(
+                                DECISION_DENIED,
+                                f"budget exhausted ({total}/{self._max_calls})",
+                            )
+                        _atomic_write_json(
+                            self._state_path, {"total": total + 1, "per_action": per_action}
+                        )
+                        return ApprovalDecision(
+                            DECISION_ALLOWED, f"within budget ({total + 1}/{self._max_calls})"
+                        )
+                    finally:
+                        if locked:
+                            try:
+                                import fcntl as _fcntl2
+
+                                _fcntl2.flock(handle.fileno(), _fcntl2.LOCK_UN)
+                            except Exception:  # noqa: S110 - best-effort unlock
+                                pass
+            except PolicyError as exc:
+                return ApprovalDecision(DECISION_DENIED, f"{exc}; failing closed")
+            except OSError as exc:
+                return ApprovalDecision(
+                    DECISION_DENIED, f"budget state unavailable ({exc}); failing closed"
+                )
+        # Unreachable: kept for type-checkers.
+        return ApprovalDecision(DECISION_DENIED, "budget state unavailable; failing closed")
+
+
+class FileRateLimitProvider:
+    """Durable sliding-window rate limit shared across processes/restarts.
+
+    Attempt timestamps live in *state_path* as JSON (``{"attempts": [...]}``).
+    Only allowed attempts are recorded, matching :class:`RateLimitProvider`.
+    Corrupt or unwritable state fails closed (deny).
+    """
+
+    def __init__(
+        self,
+        max_calls: int,
+        window_seconds: float,
+        state_path: str | Path,
+        *,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        if max_calls <= 0:
+            raise ValueError("max_calls must be positive")
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        self._max_calls = max_calls
+        self._window = window_seconds
+        self._state_path = Path(state_path)
+        self._clock = clock or time.monotonic
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        now = self._clock()
+        lock = _state_lock(self._state_path)
+        with lock:
+            try:
+                self._state_path.parent.mkdir(parents=True, exist_ok=True)
+                lockfile = self._state_path.with_name(f"{self._state_path.name}.lock")
+                with open(lockfile, "a+b") as handle:
+                    try:
+                        import fcntl as _fcntl
+
+                        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+                        locked = True
+                    except Exception:
+                        locked = False
+                    try:
+                        state = _read_json_state(self._state_path)
+                        attempts: list[float] = []
+                        if state is not None:
+                            raw_attempts = state.get("attempts", [])
+                            if not isinstance(raw_attempts, list) or not all(
+                                isinstance(t, (int, float)) for t in raw_attempts
+                            ):
+                                raise PolicyError(f"policy state {self._state_path} is corrupt")
+                            attempts = [float(t) for t in raw_attempts]
+                        cutoff = now - self._window
+                        attempts = [t for t in attempts if t > cutoff]
+                        if len(attempts) >= self._max_calls:
+                            _atomic_write_json(self._state_path, {"attempts": attempts})
+                            return ApprovalDecision(
+                                DECISION_DENIED,
+                                f"rate limit exceeded ({self._max_calls} per {self._window:g}s)",
+                            )
+                        attempts.append(now)
+                        _atomic_write_json(self._state_path, {"attempts": attempts})
+                        return ApprovalDecision(DECISION_ALLOWED, "within rate limit")
+                    finally:
+                        if locked:
+                            try:
+                                import fcntl as _fcntl2
+
+                                _fcntl2.flock(handle.fileno(), _fcntl2.LOCK_UN)
+                            except Exception:  # noqa: S110 - best-effort unlock
+                                pass
+            except PolicyError as exc:
+                return ApprovalDecision(DECISION_DENIED, f"{exc}; failing closed")
+            except OSError as exc:
+                return ApprovalDecision(
+                    DECISION_DENIED, f"rate-limit state unavailable ({exc}); failing closed"
+                )
+        return ApprovalDecision(DECISION_DENIED, "rate-limit state unavailable; failing closed")
 
 
 def load_policy_file(path: str | Path) -> RuleProvider:
