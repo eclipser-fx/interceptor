@@ -1,0 +1,15 @@
+{
+  "expect": {
+    "codes": [],
+    "events_verified": 2,
+    "valid": true
+  },
+  "journal": [
+    "{\"action_id\":\"__main__.main.<locals>.u\",\"action_name\":\"vec.trunc\",\"approval_mode\":\"required\",\"approval_reason\":\"vector allow\",\"contract_hash\":\"10c476d434b0521f64f9481fc750b72cfb1ddba2da453df310c8f88d1927e09d\",\"decision\":\"allowed\",\"event_hash\":\"a4562821dc4c82d774e7e186f94231f5b9f539595546cd6eb83bf0d327fd1321\",\"event_id\":\"e35fd162-572c-4cec-8de9-939e0ee46253\",\"event_type\":\"decision\",\"input_hash\":\"5041bf1f713df204784353e82f6a4a535931cb64f1f4b4a5aeaffcb720918b22\",\"key_id\":\"ed25519:982ef0126f34986c\",\"parameter_retention\":[{\"name\":\"x\",\"state\":\"retained\"}],\"previous_event_hash\":null,\"redacted_input_summary\":\"x=1\",\"risk\":\"medium\",\"schema_version\":\"1\",\"signature\":\"MigdJY6T1jkDuaRuCy/CDTbElay3ElOw+wItYQUW7qbcVgCJJ5A6V49CD6Sul+N5rc4ri7MiTh8guwxW6kqJCw==\",\"timestamp_utc\":\"2026-09-05T02:52:46.521083Z\"}",
+    "{\"action_id\":\"__main__.main.<locals>.u\",\"action_name\":\"vec.trunc\",\"contract_hash\":\"10c476d434b0521f64f9481fc750b72cfb1ddba2da453df310c8f88d1927e09d\",\"decision_event_id\":\"e35fd162-572c-4cec-8de9-939e0ee46253\",\"event_hash\":\"ff392e5b27bf98895d4420cce68dee6e6db7c3f37e70679f52c42180c100f36c\",\"event_id\":\"05a12bc4-03d4-4a9e-904c-b20dfca6c3c3\",\"event_type\":\"outcome\",\"key_id\":\"ed25519:982ef0126f34986c\",\"observed_result_type\":\"builtins.int\",\"previous_event_hash\":\"a4562821dc4c82d774e7e186f94231f5b9f539595546cd6eb83bf0d327fd1321\",\"redacted_output_hash\":\"6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b\",\"schema_version\":\"1\",\"signature\":\"jKCbkaF3p055nT9FQ9c3ZHiVrKz9RWoQTvUbvlPNqim1AzELD3XwGNS3oCofgd+QfCsiDW0tRIiPCCiLytNODw==\",\"status\":\"succeeded\",\"timestamp_utc\":\"2026-09-05T02:52:46.522153Z\"}"
+  ],
+  "name": "truncated-tail-no-witness",
+  "public_keys": [
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA8Ba/AAu5X5+JtUQIL5l3qXJnNDqvgZ8jvj0MZMBnPOw=\n-----END PUBLIC KEY-----\n"
+  ]
+}
