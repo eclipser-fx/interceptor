@@ -38,7 +38,15 @@ from .journal import EVENT_SCHEMA_VERSION, event_digest, unsigned_payload
 
 KNOWN_SCHEMA_VERSIONS = frozenset({EVENT_SCHEMA_VERSION})
 KNOWN_EVENT_TYPES = frozenset(
-    {"decision", "outcome", "checkpoint", "resolution", "countersignature", "archive"}
+    {
+        "decision",
+        "outcome",
+        "checkpoint",
+        "resolution",
+        "countersignature",
+        "archive",
+        "rotation",
+    }
 )
 
 _SHARED_REQUIRED_FIELDS = (
@@ -116,6 +124,19 @@ _ARCHIVE_REQUIRED_FIELDS = (
     "prior_count",
     "prior_head",
     "archived_path",
+)
+_ROTATION_REQUIRED_FIELDS = (
+    "schema_version",
+    "event_type",
+    "event_id",
+    "timestamp_utc",
+    "key_id",
+    "previous_event_hash",
+    "event_hash",
+    "signature",
+    "prior_key_id",
+    "successor_key_id",
+    "successor_fingerprint",
 )
 
 KNOWN_RESOLUTIONS = frozenset({"confirmed_completed", "confirmed_not_completed"})
@@ -526,6 +547,8 @@ def _verify_event(
         required = list(_COUNTERSIGNATURE_REQUIRED_FIELDS)
     elif event_type == "archive":
         required = list(_ARCHIVE_REQUIRED_FIELDS)
+    elif event_type == "rotation":
+        required = list(_ROTATION_REQUIRED_FIELDS)
     else:
         required = list(_SHARED_REQUIRED_FIELDS)
         required += (
@@ -671,6 +694,56 @@ def _verify_event(
                     line_number,
                     "archive_bad_path",
                     "archived_path is not a string",
+                )
+            )
+
+    # Rotation shape: old key authorizes its successor in-chain.
+    if event_type == "rotation":
+        prior = event.get("prior_key_id")
+        successor = event.get("successor_key_id")
+        fingerprint = event.get("successor_fingerprint")
+        if prior != event.get("key_id"):
+            issues.append(
+                VerificationIssue(
+                    line_number,
+                    "rotation_signer_mismatch",
+                    "prior_key_id must equal the signing key_id",
+                )
+            )
+        if not isinstance(successor, str) or not successor.startswith("ed25519:"):
+            issues.append(
+                VerificationIssue(
+                    line_number,
+                    "rotation_bad_successor",
+                    "successor_key_id is not an ed25519 key id",
+                )
+            )
+        if (
+            not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(c not in "0123456789abcdef" for c in fingerprint)
+        ):
+            issues.append(
+                VerificationIssue(
+                    line_number,
+                    "rotation_bad_fingerprint",
+                    "successor_fingerprint is not 64-char lowercase hex",
+                )
+            )
+        elif isinstance(successor, str) and successor != f"ed25519:{fingerprint[:16]}":
+            issues.append(
+                VerificationIssue(
+                    line_number,
+                    "rotation_fingerprint_mismatch",
+                    "successor_key_id does not match successor_fingerprint",
+                )
+            )
+        if isinstance(prior, str) and prior == successor:
+            issues.append(
+                VerificationIssue(
+                    line_number,
+                    "rotation_self_successor",
+                    "successor must differ from prior key",
                 )
             )
 
