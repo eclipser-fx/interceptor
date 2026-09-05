@@ -550,12 +550,18 @@ callers can distinguish it from "did not run" instead of guessing.
 ## Development
 
 ```sh
-pip install -e . pytest hypothesis pytest-cov
-pytest
-ruff check .
-ruff format --check .
-mypy
+uv sync          # creates .venv, installs the package + dev group from uv.lock
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
 ```
+
+`uv.lock` pins the full dependency tree — CI runs `uv sync --frozen`, so a
+stale lock fails fast and dependency changes always show up as explicit diffs.
+Prefer `uv add` for new dependencies so the lock stays in sync. Plain `pip`
+still works (`pip install -e . pytest hypothesis pytest-cov`), since
+`pyproject.toml` remains the single source of truth.
 
 The suite runs under an autouse fixture that makes socket creation raise, so a
 network call introduced anywhere fails the tests rather than the audit.
