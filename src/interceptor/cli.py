@@ -160,12 +160,22 @@ def build_parser() -> argparse.ArgumentParser:
     countersign.add_argument(
         "--signing-key", type=Path, required=True, help="counter private key (PEM)"
     )
+    countersign.add_argument(
+        "--password-env",
+        default=None,
+        help="env var holding the counter-key password (never passed as argv)",
+    )
     countersign.add_argument("--json", action="store_true", help="emit JSON")
 
     keygen = subparsers.add_parser(
         "keygen", help="generate a standalone Ed25519 key (e.g. for counter-signing)"
     )
     keygen.add_argument("--output", type=Path, required=True, help="private key path to write")
+    keygen.add_argument(
+        "--password-env",
+        default=None,
+        help="env var holding the password to encrypt the new key with",
+    )
     keygen.add_argument("--json", action="store_true", help="emit JSON")
 
     export = subparsers.add_parser(
@@ -516,11 +526,25 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _password_from_env(var: str | None) -> str | None:
+    """Read a key password from *var* without echoing it into argv or logs."""
+    if var is None:
+        return None
+    import os as _os
+
+    value = _os.environ.get(var)
+    if not value:
+        raise InterceptorError(f"password env var {var!r} is not set or empty")
+    return value
+
+
 def _cmd_countersign(args: argparse.Namespace) -> int:
     from .cosign import countersign_journal
 
     journal_path = args.journal or default_journal_path()
-    report = countersign_journal(journal_path, args.signing_key)
+    report = countersign_journal(
+        journal_path, args.signing_key, _password_from_env(args.password_env)
+    )
     payload = {
         "journal": str(journal_path),
         "event_id": report.countersignature_event["event_id"],
@@ -543,8 +567,9 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
     from .identity import EphemeralSigningIdentity, generate_private_key
 
     output = Path(args.output)
-    generate_private_key(output)
-    signer = EphemeralSigningIdentity.from_file(output)
+    password = _password_from_env(args.password_env)
+    generate_private_key(output, password)
+    signer = EphemeralSigningIdentity.from_file(output, password)
     payload = {
         "path": str(output),
         "key_id": signer.key_id,
