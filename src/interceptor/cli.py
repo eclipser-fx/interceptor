@@ -74,11 +74,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify.add_argument("--json", action="store_true", help="emit JSON")
 
+    verify_chain = subparsers.add_parser(
+        "verify-chain", help="verify a journal plus every archived predecessor it links to"
+    )
+    verify_chain.add_argument("--journal", type=Path, default=None, help="live journal path")
+    verify_chain.add_argument(
+        "--public-key",
+        type=Path,
+        action="append",
+        default=None,
+        help="verifying key path (repeatable; defaults to the trusted key set)",
+    )
+    verify_chain.add_argument("--json", action="store_true", help="emit JSON")
+
     key_info = subparsers.add_parser("key-info", help="print the local signing identity")
     key_info.add_argument("--json", action="store_true", help="emit JSON")
 
     key_rotate = subparsers.add_parser(
         "key-rotate", help="replace the signing key, keeping old evidence verifiable"
+    )
+    key_rotate.add_argument("--journal", type=Path, default=None, help="journal to record to")
+    key_rotate.add_argument(
+        "--no-record",
+        action="store_true",
+        help="skip appending the signed rotation record",
     )
     key_rotate.add_argument("--json", action="store_true", help="emit JSON")
 
@@ -196,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "verify":
             return _cmd_verify(args)
+        if args.command == "verify-chain":
+            return _cmd_verify_chain(args)
         if args.command == "key-info":
             return _cmd_key_info(args)
         if args.command == "key-rotate":
@@ -296,7 +317,9 @@ def _cmd_key_info(args: argparse.Namespace) -> int:
 
 
 def _cmd_key_rotate(args: argparse.Namespace) -> int:
-    identity = rotate_key()
+    journal = getattr(args, "journal", None)
+    record = not getattr(args, "no_record", False)
+    identity = rotate_key(journal_path=journal, record=record)
     trusted = load_trusted_public_keys(identity.home)
     payload = {
         "home": str(identity.home),
@@ -599,7 +622,8 @@ def _cmd_stats(args: argparse.Namespace) -> int:
             f"  {payload['events']} events: {payload['decisions']} decisions, "
             f"{payload['outcomes']} outcomes, {payload['resolutions']} resolutions, "
             f"{payload['countersignatures']} countersignatures, "
-            f"{payload['checkpoints']} checkpoints, {payload['archives']} archives"
+            f"{payload['checkpoints']} checkpoints, {payload['archives']} archives, "
+            f"{payload.get('rotations', 0)} rotations"
         )
         for action, count in sorted(payload["by_action"].items()):
             print(f"    {count:5}  {action}")
@@ -628,6 +652,48 @@ def _cmd_archive(args: argparse.Namespace) -> int:
         for pruned in report.pruned:
             print(f"  pruned:          {pruned}")
     return EXIT_OK
+
+
+def _cmd_verify_chain(args: argparse.Namespace) -> int:
+    from .archive import verify_archive_chain
+
+    journal_path = args.journal or default_journal_path()
+    if not journal_path.exists():
+        _fail(f"no journal at {journal_path}", as_json=args.json)
+        return EXIT_FAILURE
+    try:
+        keys = _resolve_verification_keys(args)
+    except InterceptorError as exc:
+        _fail(str(exc), as_json=args.json)
+        return EXIT_FAILURE
+    if not keys:
+        _fail(
+            "no trusted verification keys found; run `key-info` to create an "
+            "identity or pass --public-key",
+            as_json=args.json,
+        )
+        return EXIT_FAILURE
+    report = verify_archive_chain(journal_path, keys)
+    payload = {
+        "journal": str(journal_path),
+        "valid": report.valid,
+        "files_checked": list(report.files_checked),
+        "issues": [
+            {"file": issue.file, "code": issue.code, "message": issue.message}
+            for issue in report.issues
+        ],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    elif report.valid:
+        print(f"OK  {journal_path} (+{len(report.files_checked) - 1} archives)")
+        for checked in report.files_checked:
+            print(f"    verified {checked}")
+    else:
+        print(f"FAIL  {journal_path}")
+        for issue in report.issues:
+            print(f"      {issue.file}: [{issue.code}] {issue.message}")
+    return EXIT_OK if report.valid else EXIT_FAILURE
 
 
 def _fail(message: str, *, as_json: bool) -> None:
