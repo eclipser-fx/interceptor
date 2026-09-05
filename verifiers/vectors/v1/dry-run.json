@@ -1,0 +1,21 @@
+{
+  "expect": {
+    "audit": {
+      "issue_codes": [],
+      "statuses": [
+        "dry_run"
+      ],
+      "structurally_valid": true
+    },
+    "codes": [],
+    "events_verified": 1,
+    "valid": true
+  },
+  "journal": [
+    "{\"action_id\":\"__main__.main.<locals>.plan\",\"action_name\":\"ops.plan\",\"approval_mode\":\"required\",\"approval_reason\":\"vector allow\",\"contract_hash\":\"2be3159f88c87891b1b253acbb110807d2af644c2be4c63636cf4aeddc2b1cbe\",\"decision\":\"allowed\",\"dry_run\":true,\"event_hash\":\"77a90bc74246e505c8a93442279a79c1efd682c112a3f721377287f2b0fe6b01\",\"event_id\":\"73d45c0a-c769-468e-a5f7-ef1e2d36519a\",\"event_type\":\"decision\",\"input_hash\":\"0229d37e33daae149bf40543a5ce1db4459d10f830d5139279aa2bfd5f6485a1\",\"key_id\":\"ed25519:c102e7c2fe0cb81c\",\"parameter_retention\":[{\"name\":\"name\",\"state\":\"retained\"}],\"previous_event_hash\":null,\"redacted_input_summary\":\"name=\\\"x\\\"\",\"risk\":\"medium\",\"schema_version\":\"1\",\"signature\":\"Tgcq5DF4ZAKrzIGaWnRy4jlEojrt13WBaAhWrouRSjeoMZEs0QNWl65p5F/FEHsMRcPBJSOVVe4hm5F009uZAg==\",\"timestamp_utc\":\"2026-09-05T02:52:46.400970Z\"}"
+  ],
+  "name": "dry-run",
+  "public_keys": [
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAenl9yLVQjpuimnSHvRlojjz+PNcrZjSSCMIq9zvbCZg=\n-----END PUBLIC KEY-----\n"
+  ]
+}
