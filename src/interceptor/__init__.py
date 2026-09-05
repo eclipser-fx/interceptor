@@ -53,7 +53,12 @@ from .canonical import REDACTED, Canonicalized, canonical_hash, canonicalize
 from .checkpoint import CheckpointReport, checkpoint_journal
 from .contracts import ActionContract, ParameterDescriptor
 from .cosign import CountersignatureReport, countersign_journal
-from .engine import IdempotencyKeySpec, ReceiptExtractor, reset_idempotency_state
+from .engine import (
+    IdempotencyKeySpec,
+    ReceiptExtractor,
+    SpendExtractor,
+    reset_idempotency_state,
+)
 from .errors import (
     ActionDenied,
     ApprovalError,
@@ -88,8 +93,10 @@ from .export import (
     render_html,
     write_pack,
 )
+from .gateway import ToolGateway
 from .guard import guard
 from .identity import (
+    CallbackSigningIdentity,
     EphemeralSigningIdentity,
     LocalSigningIdentity,
     SigningIdentity,
@@ -111,16 +118,19 @@ from .policy import (
     AllOf,
     AllowListProvider,
     AnyOf,
+    AttestedApprovalProvider,
     BudgetProvider,
     CachedApprovalProvider,
     CombinedProvider,
     FileBudgetProvider,
     FileRateLimitProvider,
+    FileSpendingBudgetProvider,
     PredicateProvider,
     QuorumApprovalProvider,
     RateLimitProvider,
     Rule,
     RuleProvider,
+    SpendingBudgetProvider,
     TimeoutApprovalProvider,
     load_policy_file,
 )
@@ -191,6 +201,7 @@ __all__ = [
     "ArchiveChainReport",
     "ArchiveError",
     "ArchiveReport",
+    "AttestedApprovalProvider",
     "AuditIssue",
     "AuditReport",
     "AuditedInvocation",
@@ -198,6 +209,7 @@ __all__ = [
     "BudgetProvider",
     "CachedApprovalProvider",
     "CallableSink",
+    "CallbackSigningIdentity",
     "CanonicalizationError",
     "Canonicalized",
     "CheckpointReport",
@@ -219,6 +231,7 @@ __all__ = [
     "FileJournal",
     "FileMirrorSink",
     "FileRateLimitProvider",
+    "FileSpendingBudgetProvider",
     "IdempotencyKeySpec",
     "IdentityError",
     "InterceptorError",
@@ -241,8 +254,11 @@ __all__ = [
     "ServerApprovalProvider",
     "SigningError",
     "SigningIdentity",
+    "SpendExtractor",
+    "SpendingBudgetProvider",
     "TerminalApprovalProvider",
     "TimeoutApprovalProvider",
+    "ToolGateway",
     "ToolWrapError",
     "UnsupportedFunctionError",
     "VerificationError",
