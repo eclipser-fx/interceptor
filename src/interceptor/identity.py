@@ -153,26 +153,95 @@ def load_public_key(path: Path) -> Ed25519PublicKey:
     return key
 
 
-def load_private_key(path: Path) -> Ed25519PrivateKey:
-    """Load an Ed25519 private key (unencrypted PKCS#8 PEM), e.g. a countersigning key."""
+def _password_bytes(password: bytes | str | None) -> bytes | None:
+    """Normalize a key password, or None for an unencrypted key."""
+    if password is None:
+        return None
+    if isinstance(password, bytes):
+        if not password:
+            raise IdentityError("key password must not be empty")
+        return password
+    encoded = password.encode("utf-8")
+    if not encoded:
+        raise IdentityError("key password must not be empty")
+    return encoded
+
+
+def load_private_key(path: Path, password: bytes | str | None = None) -> Ed25519PrivateKey:
+    """Load an Ed25519 private key (PKCS#8 PEM), e.g. a countersigning key.
+
+    Pass *password* for keys written with :func:`generate_private_key` password
+    encryption. A wrong password fails closed with :class:`IdentityError`.
+    """
     try:
-        key = _load_private_key(path)
+        key = _load_private_key(path, _password_bytes(password))
     except IdentityError as exc:
         raise IdentityError(f"cannot load private key from {path}: {exc}") from exc
     return key
 
 
-def generate_private_key(path: Path) -> Ed25519PrivateKey:
-    """Generate a fresh Ed25519 key at *path* (mode ``0600``), refusing to overwrite."""
+def generate_private_key(path: Path, password: bytes | str | None = None) -> Ed25519PrivateKey:
+    """Generate a fresh Ed25519 key at *path* (mode ``0600``), refusing to overwrite.
+
+    Pass *password* to encrypt the PEM with best-available encryption (X25519
+    keys in TPMs/HSMs stay out of the file entirely — use
+    :class:`CallbackSigningIdentity` for those); omit it for an unencrypted key.
+    """
     if path.exists():
         raise IdentityError(f"refusing to overwrite existing key at {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     key = Ed25519PrivateKey.generate()
     try:
-        _write_private_key(path, key)
+        _write_private_key(path, key, _password_bytes(password))
     except OSError as exc:
         raise IdentityError(f"cannot write private key to {path}: {exc}") from exc
     return key
+
+
+class CallbackSigningIdentity:
+    """A signing identity backed by an external signer (TPM, HSM, cloud KMS).
+
+    The private key never enters this process: *sign* receives the 32-byte
+    digest and returns the base64 Ed25519 signature, exactly like
+    :meth:`LocalSigningIdentity.sign`. Key custody (PINs, sessions, handles)
+    stays with the callback. Verification needs only *public_key*, unchanged.
+    """
+
+    def __init__(
+        self,
+        public_key: Ed25519PublicKey,
+        sign: Any,
+        *,
+        key_id: str | None = None,
+    ) -> None:
+        raw = public_key.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        self._public_key = public_key
+        self._fingerprint = sha256_hex(raw)
+        self._sign_fn = sign
+        self._key_id = key_id or f"ed25519:{self._fingerprint[:16]}"
+
+    @property
+    def key_id(self) -> str:
+        return self._key_id
+
+    @property
+    def fingerprint(self) -> str:
+        return self._fingerprint
+
+    def sign(self, digest: bytes) -> str:
+        try:
+            signature = self._sign_fn(digest)
+        except Exception as exc:
+            raise SigningError(f"external signer failed: {exc}") from exc
+        if not isinstance(signature, str):
+            raise SigningError("external signer must return a base64 string")
+        return signature
+
+    def public_key(self) -> Ed25519PublicKey:
+        return self._public_key
 
 
 class EphemeralSigningIdentity:
@@ -191,8 +260,10 @@ class EphemeralSigningIdentity:
         self._fingerprint = sha256_hex(raw)
 
     @classmethod
-    def from_file(cls, path: str | Path) -> EphemeralSigningIdentity:
-        return cls(load_private_key(Path(path)))
+    def from_file(
+        cls, path: str | Path, password: bytes | str | None = None
+    ) -> EphemeralSigningIdentity:
+        return cls(load_private_key(Path(path), password))
 
     @classmethod
     def generate(cls) -> EphemeralSigningIdentity:
@@ -426,9 +497,9 @@ def _require_private_permissions(path: Path) -> None:
         )
 
 
-def _load_private_key(path: Path) -> Ed25519PrivateKey:
+def _load_private_key(path: Path, password: bytes | None = None) -> Ed25519PrivateKey:
     try:
-        key = serialization.load_pem_private_key(path.read_bytes(), password=None)
+        key = serialization.load_pem_private_key(path.read_bytes(), password=password)
     except (OSError, ValueError, TypeError) as exc:
         raise IdentityError(f"cannot load private key from {path}: {exc}") from exc
     if not isinstance(key, Ed25519PrivateKey):
@@ -436,11 +507,16 @@ def _load_private_key(path: Path) -> Ed25519PrivateKey:
     return key
 
 
-def _write_private_key(path: Path, key: Ed25519PrivateKey) -> None:
+def _write_private_key(path: Path, key: Ed25519PrivateKey, password: bytes | None = None) -> None:
+    encryption: serialization.KeySerializationEncryption = (
+        serialization.BestAvailableEncryption(password)
+        if password is not None
+        else serialization.NoEncryption()
+    )
     pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
+        encryption_algorithm=encryption,
     )
     _write_restricted(path, pem, stat.S_IRUSR | stat.S_IWUSR)
 
