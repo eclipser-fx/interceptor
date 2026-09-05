@@ -24,6 +24,7 @@ from .contracts import _build_contract_unchecked, build_contract
 from .engine import (
     IdempotencyKeySpec,
     ReceiptExtractor,
+    SpendExtractor,
     _make_async_wrapper,
     _make_sync_wrapper,
 )
@@ -69,6 +70,7 @@ def wrap_tool(
     dry_run: bool = ...,
     idempotency_key: IdempotencyKeySpec = ...,
     receipt_from: ReceiptExtractor = ...,
+    spend_from: SpendExtractor = ...,
 ) -> Callable[P, R]: ...
 
 
@@ -89,6 +91,7 @@ def wrap_tool(
     dry_run: bool = ...,
     idempotency_key: IdempotencyKeySpec = ...,
     receipt_from: ReceiptExtractor = ...,
+    spend_from: SpendExtractor = ...,
 ) -> Callable[..., Any]: ...
 
 
@@ -108,6 +111,7 @@ def wrap_tool(
     dry_run: bool = False,
     idempotency_key: IdempotencyKeySpec = None,
     receipt_from: ReceiptExtractor = None,
+    spend_from: SpendExtractor = None,
 ) -> Callable[..., Any]:
     """Guard an existing callable without editing its source.
 
@@ -133,6 +137,8 @@ def wrap_tool(
         observer: Injectable ``ActionObserver``.
         dry_run: Record the decision but do not execute; return ``None``.
         idempotency_key: Parameter name, literal, or callable over bound args.
+        spend_from: Callable over bound args returning non-negative int cents,
+            recorded on the decision event for budget enforcement.
 
     Raises:
         ToolWrapError: If *func* is already guarded, not callable, or is a
@@ -184,6 +190,7 @@ def wrap_tool(
             dry_run,
             idempotency_key,
             receipt_from,
+            spend_from,
         )
     else:
         wrapper = _make_sync_wrapper(
@@ -200,6 +207,7 @@ def wrap_tool(
             dry_run,
             idempotency_key,
             receipt_from,
+            spend_from,
         )
 
     functools.update_wrapper(wrapper, func, updated=())
