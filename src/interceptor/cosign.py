@@ -42,18 +42,20 @@ class CountersignatureReport:
 def countersign_journal(
     path: str | Path,
     signing_key: str | Path,
+    password: bytes | str | None = None,
 ) -> CountersignatureReport:
     """Counter-sign the newest checkpoint in *path* with an external key.
 
-    Raises :class:`CountersignError` when the journal holds no checkpoint or
-    the signing key cannot be loaded.
+    Pass *password* for password-encrypted counter keys. Raises
+    :class:`CountersignError` when the journal holds no checkpoint or the
+    signing key cannot be loaded.
     """
     journal = Path(path)
     checkpoint = _newest_checkpoint(journal)
     if checkpoint is None:
         raise CountersignError(f"no checkpoint in {journal}; run `interceptor checkpoint` first")
     try:
-        signer = EphemeralSigningIdentity.from_file(Path(signing_key))
+        signer = EphemeralSigningIdentity.from_file(Path(signing_key), password)
     except Exception as exc:
         raise CountersignError(f"cannot load countersigning key: {exc}") from exc
 
