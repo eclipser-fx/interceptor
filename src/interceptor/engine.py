@@ -107,6 +107,11 @@ IdempotencyKeySpec = str | Callable[[dict[str, Any]], Any] | None
 #: that already succeeded.
 ReceiptExtractor = Callable[[Any], Any] | None
 
+#: Extracts a spend amount in minor currency units (cents) from the bound
+#: call arguments. Return a non-negative ``int`` or None when the call spends
+#: nothing countable. Called before approval; failures fail closed.
+SpendExtractor = Callable[[dict[str, Any]], Any] | None
+
 _MAX_RECEIPT_CHARS = 2000
 
 
@@ -242,6 +247,28 @@ def _resolve_idempotency_key(
     return key
 
 
+def _resolve_spend_cents(
+    spec: SpendExtractor, bound_arguments: dict[str, Any], action_name: str
+) -> int | None:
+    """The declared spend for this call in minor units, or None when undeclared."""
+    if spec is None:
+        return None
+    try:
+        raw = spec(dict(bound_arguments))
+    except Exception as exc:
+        raise ContractError(f"spend extractor failed for action {action_name!r}: {exc}") from exc
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ContractError(
+            f"spend for action {action_name!r} must be a non-negative int of minor units, "
+            f"got {type_name(raw)}"
+        )
+    if raw < 0:
+        raise ContractError(f"spend for action {action_name!r} must be non-negative, got {raw}")
+    return raw
+
+
 def execute_sync(
     *,
     target: Callable[..., Any],
@@ -259,6 +286,7 @@ def execute_sync(
     dry_run: bool = False,
     idempotency_key: IdempotencyKeySpec = None,
     receipt_from: ReceiptExtractor = None,
+    spend_from: SpendExtractor = None,
 ) -> Any:
     """Guard one synchronous invocation of *target* and return its result."""
     store, active_identity, decision_event, redacted_values, is_dry_run = _prepare_execution(
@@ -275,6 +303,7 @@ def execute_sync(
         observer=observer,
         dry_run=dry_run,
         idempotency_key=idempotency_key,
+        spend_from=spend_from,
     )
     if is_dry_run:
         return None
@@ -329,6 +358,7 @@ async def execute_async(
     dry_run: bool = False,
     idempotency_key: IdempotencyKeySpec = None,
     receipt_from: ReceiptExtractor = None,
+    spend_from: SpendExtractor = None,
 ) -> Any:
     """Guard one asynchronous invocation of *target* and return its result."""
     store, active_identity, decision_event, redacted_values, is_dry_run = _prepare_execution(
@@ -345,6 +375,7 @@ async def execute_async(
         observer=observer,
         dry_run=dry_run,
         idempotency_key=idempotency_key,
+        spend_from=spend_from,
     )
     if is_dry_run:
         return None
@@ -419,6 +450,7 @@ def _prepare_execution(
     observer: ActionObserver | None,
     dry_run: bool = False,
     idempotency_key: IdempotencyKeySpec = None,
+    spend_from: SpendExtractor = None,
 ) -> tuple[JournalStore, SigningIdentity, dict[str, Any], tuple[str, ...], bool]:
     """Everything that must happen before the guarded callable runs.
 
@@ -441,10 +473,12 @@ def _prepare_execution(
     input_hash = sha256_hex(canonical_json_bytes(canonical_input))
     input_summary = bounded_summary(canonical_input)
 
-    # 4. Idempotency key + signing identity (fail closed before prompting).
+    # 4. Idempotency key + spend declaration + signing identity (fail closed
+    # before prompting).
     resolved_key = _resolve_idempotency_key(
         idempotency_key, dict(bound.arguments), contract.action_name
     )
+    spend_cents = _resolve_spend_cents(spend_from, dict(bound.arguments), contract.action_name)
     active_identity = identity or LocalSigningIdentity.load_or_create()
     store = _resolve_journal(journal)
 
@@ -459,6 +493,8 @@ def _prepare_execution(
             "idempotency_key": resolved_key,
             "approval_reason": "duplicate idempotency key; already reserved or completed",
         }
+        if spend_cents is not None:
+            extra["spend_cents"] = spend_cents
         if prior_id is not None:
             extra["duplicate_of"] = prior_id
         if canonical_metadata is not None:
@@ -514,6 +550,7 @@ def _prepare_execution(
         redacted_input_summary=input_summary,
         input_hash=input_hash,
         contract_hash=contract.contract_hash,
+        spend_cents=spend_cents,
     )
     decision = _evaluate_approval(request, contract, approval_provider)
 
@@ -537,6 +574,8 @@ def _prepare_execution(
             )
         if resolved_key is not None:
             extra["idempotency_key"] = resolved_key
+        if spend_cents is not None:
+            extra["spend_cents"] = spend_cents
         if dry_run:
             extra["dry_run"] = True
         if canonical_metadata is not None:
@@ -794,6 +833,7 @@ def _make_sync_wrapper(
     dry_run: bool = False,
     idempotency_key: IdempotencyKeySpec = None,
     receipt_from: ReceiptExtractor = None,
+    spend_from: SpendExtractor = None,
 ) -> Callable[..., Any]:
     """Build a synchronous wrapper delegating to the shared guard engine."""
 
@@ -814,6 +854,7 @@ def _make_sync_wrapper(
             dry_run=dry_run,
             idempotency_key=idempotency_key,
             receipt_from=receipt_from,
+            spend_from=spend_from,
         )
 
     return wrapper
@@ -833,6 +874,7 @@ def _make_async_wrapper(
     dry_run: bool = False,
     idempotency_key: IdempotencyKeySpec = None,
     receipt_from: ReceiptExtractor = None,
+    spend_from: SpendExtractor = None,
 ) -> Callable[..., Any]:
     """Build an asynchronous wrapper delegating to the shared guard engine."""
 
@@ -853,6 +895,7 @@ def _make_async_wrapper(
             dry_run=dry_run,
             idempotency_key=idempotency_key,
             receipt_from=receipt_from,
+            spend_from=spend_from,
         )
 
     return wrapper
