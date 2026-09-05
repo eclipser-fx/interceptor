@@ -88,6 +88,7 @@ Every event carries:
 | `duplicate_of` | string, optional — prior decision `event_id` this duplicate was blocked by |
 | `approval_reason` | string — the provider's reason, scrubbed of redacted values, bounded |
 | `approved_by` | string, optional — provider-supplied approver identity, scrubbed, bounded |
+| `spend_cents` | integer, optional — declared spend in minor units, from `spend_from` |
 
 `parameter_retention` records, for each top-level argument in canonical key
 order, whether its recorded value is the redaction marker (`"redacted"`), an
