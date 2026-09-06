@@ -75,6 +75,7 @@ from .errors import (
     CanonicalizationError,
     ContractError,
     DuplicateActionError,
+    EventShipError,
     ExecutionCompletedEvidenceError,
     InterceptorError,
 )
@@ -235,6 +236,12 @@ def _resolve_idempotency_key(
             raise ContractError(
                 f"idempotency key function failed for action {action_name!r}: {exc}"
             ) from exc
+        if raw is None:
+            raise ContractError(
+                f"idempotency key function for action {action_name!r} returned None; "
+                "return a non-empty key (a None spec disables idempotency, "
+                "a None return does not)"
+            )
     elif spec in bound_arguments:
         raw = bound_arguments[spec]
     else:
@@ -584,16 +591,21 @@ def _prepare_execution(
 
     decision_event: dict[str, Any]
     if resolved_key is not None and _has_atomic_append(store):
+        atomic_duplicate_of: str | None = None
+        atomic_is_duplicate = False
 
         def _build_atomic(
             previous_hash: str | None, blocking_prior_id: str | None
         ) -> dict[str, Any]:
+            nonlocal atomic_duplicate_of, atomic_is_duplicate
             # Re-check the in-process set inside the file lock (double-checked).
             in_process_blocked = _is_completed(store, contract.action_name, resolved_key)
             effective_prior = blocking_prior_id
             if effective_prior is None and in_process_blocked:
                 effective_prior = None
             if effective_prior is not None or in_process_blocked:
+                atomic_is_duplicate = True
+                atomic_duplicate_of = effective_prior
                 payload: dict[str, Any] = {
                     "schema_version": EVENT_SCHEMA_VERSION,
                     "event_type": EVENT_TYPE_DECISION,
@@ -627,16 +639,8 @@ def _prepare_execution(
             action_name=contract.action_name,
             idempotency_key=resolved_key,
         )
-        if decision_event.get("decision") == DECISION_DENIED and decision_event.get(
-            "approval_reason"
-        ) == _duplicate_extra(None).get("approval_reason"):
-            raise DuplicateActionError(
-                contract.action_name,
-                resolved_key,
-                decision_event.get("duplicate_of")
-                if isinstance(decision_event.get("duplicate_of"), str)
-                else None,
-            )
+        if atomic_is_duplicate:
+            raise DuplicateActionError(contract.action_name, resolved_key, atomic_duplicate_of)
     else:
         # Non-file stores: close the thread race with a post-approval check.
         if resolved_key is not None and _is_completed(store, contract.action_name, resolved_key):
@@ -667,6 +671,13 @@ def _evaluate_approval(
     provider: ApprovalProvider | None,
 ) -> ApprovalDecision:
     if contract.approval_mode == "never":
+        if provider is not None and not isinstance(provider, AutoAllowProvider):
+            raise ContractError(
+                "approval='never' ignores any approval_provider; remove the provider "
+                "or use approval='required' so budgets, quorum, and attribution "
+                "actually enforce (decoration-time checks cover @guard/wrap_tool; "
+                "this covers raw-engine use)"
+            )
         active: ApprovalProvider = AutoAllowProvider()
     else:
         active = provider or TerminalApprovalProvider()
@@ -679,9 +690,16 @@ def _evaluate_approval(
             f"approval provider failed for action {contract.action_name!r}: "
             f"{type_name(exc)}; failing closed"
         ) from exc
-    if decision.decision not in (DECISION_ALLOWED, DECISION_DENIED):
+    try:
+        verdict = decision.decision
+    except AttributeError as exc:
         raise ApprovalError(
-            f"approval provider returned invalid decision {decision.decision!r}; failing closed"
+            f"approval provider returned {type_name(decision)} instead of an "
+            f"ApprovalDecision; failing closed"
+        ) from exc
+    if verdict not in (DECISION_ALLOWED, DECISION_DENIED):
+        raise ApprovalError(
+            f"approval provider returned invalid decision {verdict!r}; failing closed"
         )
     return decision
 
@@ -758,6 +776,21 @@ def _record_outcome_or_raise(
 
     try:
         _append_event(store, identity, contract, EVENT_TYPE_OUTCOME, extra)
+    except EventShipError as ship_exc:
+        # The local outcome IS durable; only a witness copy is missing. Report
+        # that precisely (with the result attached) instead of claiming the
+        # outcome could not be persisted. Retry is unsafe: the side effect ran.
+        raise EventShipError(
+            f"action {contract.action_name!r} EXECUTED and its outcome was recorded "
+            f"locally, but a witness sink failed ({ship_exc}). Backfill the witness "
+            "before relying on off-host evidence.",
+            decision_event_id=decision_event["event_id"],
+            result=result,
+            executed=True,
+            retry_safe=False,
+            function_outcome=status,
+            action_id=contract.action_id,
+        ) from ship_exc
     except Exception as journal_exc:
         message = (
             f"action {contract.action_name!r} EXECUTED (function outcome: {status}) "
