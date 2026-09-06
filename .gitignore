@@ -10,3 +10,5 @@ dist/
 .hypothesis/
 .ruff_cache/
 .DS_Store
+node_modules/
+ts/dist/
