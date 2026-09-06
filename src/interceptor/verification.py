@@ -688,12 +688,21 @@ def _verify_event(
                     "prior_count is not a positive integer",
                 )
             )
-        if not isinstance(event.get("archived_path"), str):
+        archived_path = event.get("archived_path")
+        if not isinstance(archived_path, str):
             issues.append(
                 VerificationIssue(
                     line_number,
                     "archive_bad_path",
                     "archived_path is not a string",
+                )
+            )
+        elif "/" in archived_path or "\\" in archived_path or archived_path in (".", ".."):
+            issues.append(
+                VerificationIssue(
+                    line_number,
+                    "archive_bad_path",
+                    "archived_path must be a bare file name",
                 )
             )
 
