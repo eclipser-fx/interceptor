@@ -48,6 +48,11 @@ const REQUIRED = {
   rotation: [...SHARED, "prior_key_id", "successor_key_id", "successor_fingerprint"],
 };
 
+function badArchivePath(value) {
+  return typeof value !== "string" || value === "" || value === "." || value === ".." ||
+    value.includes("/") || value.includes("\\");
+}
+
 function pyFloat(value) {
   // Python repr() subset sufficient for evidence values. Both runtimes use
   // shortest-round-trip digits, so plain decimals already agree; the gaps are
@@ -300,6 +305,23 @@ function main() {
         issues.push({ line_number: lineNo, code: "countersignature_orphan", message: "unknown checkpoint" });
       } else if (ref.checkpoint_count !== event.checkpoint_count || ref.head_sha256 !== event.head_sha256) {
         issues.push({ line_number: lineNo, code: "countersignature_mismatch", message: "count/head differ" });
+      }
+    }
+    if (event.event_type === "archive" && badArchivePath(event.archived_path)) {
+      issues.push({ line_number: lineNo, code: "archive_bad_path", message: "archived_path must be a bare file name" });
+    }
+    if (event.event_type === "rotation") {
+      if (event.prior_key_id !== event.key_id) {
+        issues.push({ line_number: lineNo, code: "rotation_signer_mismatch", message: "prior_key_id must equal key_id" });
+      }
+      const fp = event.successor_fingerprint;
+      if (typeof fp !== "string" || !/^[0-9a-f]{64}$/.test(fp)) {
+        issues.push({ line_number: lineNo, code: "rotation_bad_fingerprint", message: "successor_fingerprint is not 64-char hex" });
+      } else if (event.successor_key_id !== `ed25519:${fp.slice(0, 16)}`) {
+        issues.push({ line_number: lineNo, code: "rotation_fingerprint_mismatch", message: "successor_key_id does not match fingerprint" });
+      }
+      if (event.prior_key_id === event.successor_key_id) {
+        issues.push({ line_number: lineNo, code: "rotation_self_successor", message: "successor must differ from prior" });
       }
     }
   });
