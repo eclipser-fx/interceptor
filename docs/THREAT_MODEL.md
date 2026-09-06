@@ -77,13 +77,17 @@ modification.
 
 Counter-signatures from a second party, or shipping events to an append-only
 remote as they are written, would detect even re-signing truncation. The
-`ActionObserver` hook is not that — it sees contracts, not events. The
-`countersign` command is a partial answer: a second key held elsewhere signs
-the newest checkpoint in-chain, so rewriting history afterwards requires both
-keys. It does not cover events after the countersignature, and a second party
-that signs blindly attests to nothing — countersign only checkpoints you have
-verified. Shipping events to an append-only remote as they are written remains
-unimplemented.
+`ActionObserver` hook is not that — it sees contracts, not events.
+`FanoutJournalStore` + `FileMirrorSink` ship every event to witness sinks as
+written (fail-closed by default; a ship failure raises `EventShipError`
+without silently dropping the witness), and `interceptor witness` checkpoints
+and ships the witness off-host in one cron-ready command. Operating the remote
+end — a second disk, a WORM bucket, a second host — remains yours; see
+`docs/DEPLOYMENT.md`. The `countersign` command is a partial answer: a second
+key held elsewhere signs the newest checkpoint in-chain, so rewriting history
+afterwards requires both keys. It does not cover events after the
+countersignature, and a second party that signs blindly attests to nothing —
+countersign only checkpoints you have verified.
 
 ### Resolutions are attestations, not evidence
 
