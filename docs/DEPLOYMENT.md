@@ -15,7 +15,28 @@ Rules: the witness dir must live where the journal cannot reach (separate
 mount, second host, WORM bucket). Alert on any non-zero `verify` exit —
 including `needs_reconciliation` from `audit`, which is an operational state,
 not a clean bill of health. With a second key available, pass
-`--counter-key` so each witness is also countersigned.
+`--counter-key` so each witness is also countersigned. Audit the whole
+directory (not just `latest`) on its own schedule — every shipped witness must
+stay covered:
+
+```cron
+*/15 * * * * interceptor witness-audit --witness-dir /mnt/backup-witness || page-oncall
+```
+
+For AWS, the blessed remote is an Object-Locked bucket (Compliance mode, so
+not even the account root can rewrite witnesses inside the retention window):
+
+```sh
+aws s3api create-bucket --bucket evidence-witnesses --object-lock-enabled-for-bucket
+aws s3api put-object-lock-configuration --bucket evidence-witnesses \
+  --object-lock-configuration '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":365}}}'
+aws s3api put-bucket-versioning --bucket evidence-witnesses --versioning-configuration Status=Enabled
+aws s3 sync /mnt/backup-witness s3://evidence-witnesses/$(hostname)/ --delete
+```
+
+Run `witness-audit` from a second host against its own synced copy: a journal
+that passes `verify` locally but leaves a shipped witness uncovered has a
+truncation (or a witness from another journal) — treat it as an incident.
 
 ## 2. Rotate keys and journals
 
@@ -42,23 +63,23 @@ but `matched`:
 
 ```python
 import stripe
-from interceptor import reconcile_journal, load_trusted_public_keys
+from interceptor import StripeRefundFetcher, reconcile_journal
 
-stripe.api_key = os.environ["STRIPE_API_KEY"]
+stripe.api_key = os.environ["STRIPE_API_KEY"]  # network happens in your app, never in this lib
 
-def fetch(receipt):
-    if receipt.get("processor") != "acme":
-        return None
-    refund = stripe.Refund.retrieve(receipt["refund_id"])
-    return {"processor": "acme", "refund_id": refund.id, "status": refund.status}
-
-report = reconcile_journal(journal, keys, fetch)
+report = reconcile_journal(journal, keys, StripeRefundFetcher(stripe))
 assert report.complete, [r for r in report.reconciliations if r.status != "matched"]
 ```
 
-AWS equivalent: fetch CloudTrail `LookupEvents` for the recorded request id
-and compare status fields. Treat `mismatched` as an incident and
-`provider_unknown` as a queue to work — never as permission to retry blindly.
+Record receipts in the shape the fetcher compares
+(`receipt_from=lambda r: {"processor": "stripe", "refund_id": r["id"]}`).
+`StripeRefundFetcher` takes your configured client instead of importing one,
+so `stripe` stays an application dependency. Anything but `matched` is an
+incident (`mismatched`) or a work queue (`provider_unknown`) — never a reason
+to retry blindly.
+
+AWS equivalent: write the same 20-line fetcher over CloudTrail
+`LookupEvents` for the recorded request id and compare status fields.
 
 ## 5. Monitor and retain
 
