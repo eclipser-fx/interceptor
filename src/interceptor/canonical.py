@@ -206,7 +206,12 @@ def canonicalize(
 
 
 def _redact(value: Any, collected: list[str]) -> str:
-    """Replace a sensitive value, remembering it for later error scrubbing."""
+    """Replace a sensitive value, remembering it for later error scrubbing.
+
+    Every removed value is collected — including short ones, so output-hash
+    suppression still recognizes a low-entropy secret echoing back as the
+    result. Text scrubbing applies :data:`_MIN_SCRUBBABLE_LENGTH` separately.
+    """
     if isinstance(value, str) and value:
         collected.append(value)
     elif value is not None and not isinstance(value, str):
