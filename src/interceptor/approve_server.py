@@ -5,6 +5,14 @@ library only) listing pending approval requests with Allow/Deny buttons, and
 the matching :class:`ServerApprovalProvider` blocks the guarded call until an
 operator decides or the request times out (fail closed).
 
+Scope this honestly: it is loopback/LAN on-call tooling, not a hardened web
+service. The page URL carries a bearer token (keep it out of chat, logs, and
+history — anyone holding it can approve), there is no TLS, and the default
+attribution is ``"web"``. For attributable approvals, compose with
+:class:`interceptor.policy.AttestedApprovalProvider` and treat the URL like a
+password. Each pending request additionally carries a single-use decision
+token so a forged cross-site POST without the page cannot decide it.
+
 The provider only ever sees :class:`ApprovalRequest` — the redacted summary,
 never raw arguments — so the page cannot leak what the journal does not hold.
 Binds to loopback by default; pass ``host="0.0.0.0"`` to approve from another
@@ -36,7 +44,7 @@ class _Pending:
     created_at: float
     decided: threading.Event = field(default_factory=threading.Event)
     decision: ApprovalDecision | None = None
-    token: str = ""
+    decision_token: str = ""
 
 
 class ApprovalServer:
@@ -93,7 +101,11 @@ class ApprovalServer:
         with self._lock:
             self._counter += 1
             pending_id = f"req-{self._counter}"
-            pending = _Pending(request=request, created_at=self._clock(), token=self._token)
+            pending = _Pending(
+                request=request,
+                created_at=self._clock(),
+                decision_token=secrets.token_urlsafe(16),
+            )
             self._pending[pending_id] = pending
             self._sweep_locked()
             return pending_id, pending
@@ -127,10 +139,12 @@ class ApprovalServer:
 
     # -- HTTP side --------------------------------------------------------
 
-    def _decide(self, pending_id: str, allow: bool, by: str) -> bool:
+    def _decide(self, pending_id: str, allow: bool, by: str, decision_token: str) -> bool:
         with self._lock:
             pending = self._pending.get(pending_id)
             if pending is None or pending.decided.is_set():
+                return False
+            if not secrets.compare_digest(decision_token, pending.decision_token):
                 return False
             pending.decision = ApprovalDecision(
                 DECISION_ALLOWED if allow else DECISION_DENIED,
@@ -159,7 +173,7 @@ class ApprovalServer:
                 self.wfile.write(b"forbidden")
 
             def _authed(self, query: dict[str, list[str]]) -> bool:
-                return query.get("token", [""])[0] == server._token
+                return secrets.compare_digest(query.get("token", [""])[0], server._token)
 
             def do_GET(self) -> None:
                 parsed = urllib.parse.urlparse(self.path)
@@ -176,6 +190,8 @@ class ApprovalServer:
                         "<td><form method='post' action='/decide'>"
                         f"<input type='hidden' name='token' value='{html.escape(server._token)}'>"
                         f"<input type='hidden' name='id' value='{html.escape(pending_id)}'>"
+                        f"<input type='hidden' name='req_token' value='"
+                        f"{html.escape(pending.decision_token)}'>"
                         "<button name='decision' value='allow'>Allow</button>"
                         "<button name='decision' value='deny'>Deny</button>"
                         "</form></td></tr>"
@@ -203,7 +219,7 @@ class ApprovalServer:
                     return
                 length = int(self.headers.get("Content-Length", "0"))
                 form = urllib.parse.parse_qs(self.rfile.read(length).decode())
-                if form.get("token", [""])[0] != server._token:
+                if not secrets.compare_digest(form.get("token", [""])[0], server._token):
                     self._denied()
                     return
                 pending_id = form.get("id", [""])[0]
@@ -211,6 +227,7 @@ class ApprovalServer:
                     pending_id,
                     form.get("decision", [""])[0] == "allow",
                     form.get("by", ["web"])[0][:120],
+                    form.get("req_token", [""])[0],
                 )
                 self.send_response(200 if ok else 410)
                 self.send_header("Content-Type", "text/plain")
@@ -224,7 +241,10 @@ class ServerApprovalProvider:
     """Block the guarded call until an operator clicks Allow/Deny in the server UI.
 
     Times out fail-closed after *timeout_seconds*. Print ``server.url`` to the
-    operator; the URL carries the auth token.
+    operator; the URL carries the auth token. Decisions are attributed to
+    ``"web"`` (or the ``by`` form field) — wrap this provider in
+    :class:`interceptor.policy.AttestedApprovalProvider` when the journal must
+    say *who* approved.
     """
 
     def __init__(self, server: ApprovalServer, timeout_seconds: float = 300) -> None:
