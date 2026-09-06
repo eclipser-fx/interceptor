@@ -134,6 +134,7 @@ from .policy import (
     RuleProvider,
     SpendingBudgetProvider,
     TimeoutApprovalProvider,
+    WitnessFreshnessProvider,
     load_policy_file,
 )
 from .privacy import (
@@ -288,6 +289,7 @@ __all__ = [
     "VerificationResult",
     "WitnessAuditReport",
     "WitnessFileStatus",
+    "WitnessFreshnessProvider",
     "WitnessReport",
     "__version__",
     "archive_journal",
