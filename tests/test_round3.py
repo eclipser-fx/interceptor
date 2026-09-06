@@ -16,6 +16,7 @@ from interceptor import (
     generate_private_key,
     guard,
     load_private_key,
+    rotate_key,
     verify_journal,
     wrap_tool,
 )
@@ -105,6 +106,25 @@ def test_encrypted_key_roundtrip(tmp_path):
         generate_private_key(path, "other")
     with pytest.raises(IdentityError):
         generate_private_key(tmp_path / "empty-pw.pem", "")
+
+
+def test_rotate_with_provisioned_successor(evidence_home):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from interceptor.identity import key_id_for, load_trusted_public_keys
+
+    journal = evidence_home / "journal.jsonl"
+
+    @guard(action="rot.prov", journal=journal, approval_provider=allow())
+    def act(x: int) -> int:
+        return x
+
+    act(1)
+    successor = Ed25519PrivateKey.generate()
+    new_identity = rotate_key(journal_path=journal, new_key=successor)
+    assert new_identity.key_id == key_id_for(successor.public_key())
+    act(2)
+    assert verify_journal(journal, load_trusted_public_keys(evidence_home)).valid
 
 
 def test_keygen_and_countersign_with_password_env(tmp_path, monkeypatch, evidence_home):
@@ -329,9 +349,13 @@ def test_attested_reads_env_and_rejects_missing_or_malformed(monkeypatch):
     assert AttestedApprovalProvider(allow()).decide(_req()).approved_by == "ops:bob"
     monkeypatch.delenv("INTERCEPTOR_APPROVER", raising=False)
     assert not AttestedApprovalProvider(allow()).decide(_req()).allowed
-    monkeypatch.setenv("INTERCEPTOR_APPROVER", "has space")
-    assert not AttestedApprovalProvider(allow()).decide(_req()).allowed
+    monkeypatch.setenv("INTERCEPTOR_APPROVER", "  Jane   Doe  ")
+    assert AttestedApprovalProvider(allow()).decide(_req()).approved_by == "Jane Doe"
+    monkeypatch.setenv("INTERCEPTOR_APPROVER", "has\ttab")
+    assert AttestedApprovalProvider(allow()).decide(_req()).approved_by == "has tab"
     assert not AttestedApprovalProvider(allow(), approved_by="x" * 121).decide(_req()).allowed
+    assert not AttestedApprovalProvider(allow(), approved_by="bad\x01id").decide(_req()).allowed
+    assert not AttestedApprovalProvider(allow(), approved_by="   ").decide(_req()).allowed
 
 
 def test_attested_identity_flows_to_evidence(evidence_home):
