@@ -131,6 +131,10 @@ class EvidencePersistenceError(InterceptorError):
     that already catch post-execution evidence errors.
     """
 
+    function_outcome: str | None
+    result: object
+    executed: bool
+
     def __init__(
         self,
         message: str,
@@ -189,6 +193,54 @@ class ExecutionCompletedEvidenceError(EvidencePersistenceError):
         self.decision_event_id = decision_event_id
         self.function_outcome = function_outcome
         self.result = result
+
+
+class EventShipError(JournalError, EvidencePersistenceError):
+    """The event was persisted locally but a witness sink failed.
+
+    Raised by fan-out journals after the primary append succeeded, so the
+    local evidence is intact but a witness copy is missing. Carries the
+    in-flight result on the outcome path so callers can recover it without
+    re-executing. Pre-execution occurrences mean the function did NOT run;
+    resolve the decision as not-completed and retry with the same key.
+
+    Subclasses both :class:`JournalError` (pre-execution callers already catch
+    it for "did not run") and :class:`EvidencePersistenceError` (so handlers
+    that treat persistence errors as non-retryable stay conservative — a
+    witness gap must never read as permission to retry). Distinguish the two
+    cases with the retry-safety signals:
+
+    * outcome path: ``executed`` is True, ``retry_safe`` is False,
+      ``function_outcome`` names the recorded status;
+    * decision path: ``executed`` is False (retry only after resolving the
+      decision as not-completed).
+    """
+
+    decision_event_id: str | None
+    executed: bool
+    retry_safe: bool
+    function_outcome: str | None
+    action_id: str | None
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        decision_event_id: str | None = None,
+        result: object = None,
+        executed: bool = False,
+        retry_safe: bool = False,
+        function_outcome: str | None = None,
+        action_id: str | None = None,
+    ) -> None:
+        EvidencePersistenceError.__init__(
+            self, message, function_outcome=function_outcome, result=result
+        )
+        self.decision_event_id = decision_event_id
+        self.executed = executed
+        self.retry_safe = retry_safe
+        self.function_outcome = function_outcome
+        self.action_id = action_id
 
 
 class VerificationError(InterceptorError):
