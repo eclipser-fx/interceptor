@@ -9,13 +9,14 @@
     },
     "codes": [],
     "events_verified": 1,
+    "issues": [],
     "valid": true
   },
   "journal": [
-    "{\"action_id\":\"__main__.main.<locals>.delete\",\"action_name\":\"ops.delete\",\"approval_mode\":\"required\",\"approval_reason\":\"vector deny\",\"contract_hash\":\"4e55e83e815817bb04dd5ae4279ffbec1bd37cd18ffc99beea647f6b0005f04f\",\"decision\":\"denied\",\"event_hash\":\"a4a4bc708b0690e37048bc9ea2e2315c81c1af69ffd664256bcc5934a58b718c\",\"event_id\":\"b71a4284-b11a-4235-b38c-ddc90c413be1\",\"event_type\":\"decision\",\"input_hash\":\"e4af9038aff65978aad0797450ab690d22f4c61dff9bda3e7489ef4bedd5e0f3\",\"key_id\":\"ed25519:85a4796ecc02fabf\",\"parameter_retention\":[{\"name\":\"name\",\"state\":\"retained\"}],\"previous_event_hash\":null,\"redacted_input_summary\":\"name=\\\"prod\\\"\",\"risk\":\"critical\",\"schema_version\":\"1\",\"signature\":\"GEghlIZtva4mJJ03JufxYINsEqdC4iiu0P2kmeGRdbjgtudpXaTOu0Q262meuGOjhVt2qj77box/ye18fp38BQ==\",\"timestamp_utc\":\"2026-09-05T02:52:46.376549Z\"}"
+    "{\"action_id\":\"__main__.main.<locals>.delete\",\"action_name\":\"ops.delete\",\"approval_mode\":\"required\",\"approval_reason\":\"vector deny\",\"contract_hash\":\"4e55e83e815817bb04dd5ae4279ffbec1bd37cd18ffc99beea647f6b0005f04f\",\"decision\":\"denied\",\"event_hash\":\"4b67a5bbd64cb5acfb78aabbdbcadcf5e8c4fefd893373706c5f80d69d34923b\",\"event_id\":\"00000000-0000-4000-8000-000000000003\",\"event_type\":\"decision\",\"input_hash\":\"e4af9038aff65978aad0797450ab690d22f4c61dff9bda3e7489ef4bedd5e0f3\",\"key_id\":\"ed25519:536715230074ff03\",\"parameter_retention\":[{\"name\":\"name\",\"state\":\"retained\"}],\"previous_event_hash\":null,\"redacted_input_summary\":\"name=\\\"prod\\\"\",\"risk\":\"critical\",\"schema_version\":\"1\",\"signature\":\"PR+dtsfg+ox77kffjBgd7WjI2Wp17L4sRfwuZH26l7dLNXkXOWsIJwx6DHUuV4j54zBFs739BVG3JEHHjD1XDw==\",\"timestamp_utc\":\"2026-01-01T00:00:00.000000Z\"}"
   ],
   "name": "denied",
   "public_keys": [
-    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEADBqZ0BdZchiVu8LkOfFQcukm2r++HXv9rLycwgLO7d0=\n-----END PUBLIC KEY-----\n"
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAHj831xlNTY+ZW+2UYQI1K8TztEQKYkdbNuiDnE2Qjqo=\n-----END PUBLIC KEY-----\n"
   ]
 }
