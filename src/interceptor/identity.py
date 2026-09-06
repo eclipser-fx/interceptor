@@ -406,10 +406,12 @@ def rotate_key(
     *,
     journal_path: Path | None = None,
     record: bool = True,
+    new_key: Ed25519PrivateKey | None = None,
 ) -> LocalSigningIdentity:
     """Replace the local signing key and keep the outgoing one trusted.
 
-    Generates a new Ed25519 key, overwrites ``signing_key.pem`` and
+    Generates a new Ed25519 key (or installs *new_key*, e.g. a successor
+    provisioned by an HSM), overwrites ``signing_key.pem`` and
     ``verify_key.pem``, and registers the new public key in the trusted set.
     The outgoing public key is registered first, so events signed before the
     rotation continue to verify against the default trusted set.
@@ -438,7 +440,12 @@ def rotate_key(
     public_path = home / PUBLIC_KEY_FILENAME
     home.mkdir(parents=True, exist_ok=True)
     _restrict_dir(home)
-    new_key = Ed25519PrivateKey.generate()
+    if new_key is None:
+        new_key = Ed25519PrivateKey.generate()
+    elif not isinstance(new_key, Ed25519PrivateKey):
+        raise IdentityError(
+            f"rotation successor must be an Ed25519PrivateKey, got {type(new_key).__name__}"
+        )
 
     if record and prior_private is not None and prior_key_id is not None:
         target = journal_path or (home / JOURNAL_FILENAME)
