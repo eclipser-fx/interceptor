@@ -1,23 +1,31 @@
-"""``interceptor`` — offline inspection of a local evidence journal.
+"""``interceptor`` — offline evidence for a local journal, no network involved.
 
-Every subcommand is read-only and works without a network. That is the point:
-evidence you can only check by asking a service is evidence you are trusting
-the service about.
+That is the point: evidence you can only check by asking a service is evidence
+you are trusting the service about. Read-only subcommands (``verify``,
+``verify-chain``, ``audit``, ``stats``, ``inspect``, ``export`` to stdout)
+never modify the journal; mutating ones (``checkpoint``, ``countersign``,
+``resolve``, ``archive``, ``key-rotate``, ``keygen``, ``witness``,
+``export --output``) say so in their help.
 
     interceptor verify [--journal PATH] [--public-key PATH] [--checkpoint PATH] [--json]
+    interceptor verify-chain [--journal PATH] [--public-key PATH] [--json]
+    interceptor witness --witness-dir DIR [--journal PATH] [--counter-key PATH] [--json]
+    interceptor witness-audit --witness-dir DIR [--journal PATH] [--public-key PATH] [--json]
     interceptor audit [--journal PATH] [--public-key PATH] [--json]
     interceptor checkpoint [--journal PATH] [--witness PATH] [--json]
     interceptor countersign --signing-key PATH [--journal PATH] [--json]
     interceptor resolve --decision ID --result completed|not-completed [--journal PATH]
     interceptor keygen --output PATH [--json]
+    interceptor key-rotate [--journal PATH] [--no-record] [--json]
     interceptor export [--journal PATH] [--format json|html] [--output PATH]
     interceptor stats [--journal PATH] [--json]
     interceptor archive [--journal PATH] [--keep N] [--json]
     interceptor key-info [--json]
     interceptor inspect [--journal PATH] [--json]
 
-Exit codes: ``0`` success, ``1`` verification or inspection failure, ``2``
-usage error (argparse exits ``2`` itself on a malformed command).
+Exit codes: ``0`` success; ``1`` verification, audit, or export failure
+(including structurally invalid or tampered evidence); ``2`` usage error
+(argparse exits ``2`` itself on a malformed command).
 """
 
 from __future__ import annotations
@@ -87,6 +95,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_chain.add_argument("--json", action="store_true", help="emit JSON")
 
+    witness = subparsers.add_parser(
+        "witness", help="checkpoint the journal and ship the witness out of reach"
+    )
+    witness.add_argument("--journal", type=Path, default=None, help="journal path")
+    witness.add_argument(
+        "--witness-dir", type=Path, required=True, help="directory to ship the witness to"
+    )
+    witness.add_argument(
+        "--counter-key", type=Path, default=None, help="external key to countersign with"
+    )
+    witness.add_argument(
+        "--password-env",
+        default=None,
+        help="env var holding the counter-key password (never passed as argv)",
+    )
+    witness.add_argument("--json", action="store_true", help="emit JSON")
+
+    witness_audit = subparsers.add_parser(
+        "witness-audit", help="check every shipped witness is still covered by the journal"
+    )
+    witness_audit.add_argument("--journal", type=Path, default=None, help="journal path")
+    witness_audit.add_argument(
+        "--witness-dir", type=Path, required=True, help="directory holding shipped witnesses"
+    )
+    witness_audit.add_argument(
+        "--public-key",
+        type=Path,
+        action="append",
+        default=None,
+        help="verifying key path (repeatable; defaults to the trusted key set)",
+    )
+    witness_audit.add_argument("--json", action="store_true", help="emit JSON")
+
     key_info = subparsers.add_parser("key-info", help="print the local signing identity")
     key_info.add_argument("--json", action="store_true", help="emit JSON")
 
@@ -121,8 +162,9 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument(
         "--public-key",
         type=Path,
+        action="append",
         default=None,
-        help="verifying key path (defaults to the trusted key set)",
+        help="verifying key path (repeatable; defaults to the trusted key set)",
     )
     inspect.add_argument("--json", action="store_true", help="emit JSON")
 
@@ -150,7 +192,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["completed", "not-completed"],
         help="what the external-system check found",
     )
-    resolve.add_argument("--note", default="", help="operator note (recorded, bounded)")
+    resolve.add_argument(
+        "--note",
+        default="",
+        help="operator note (recorded; truncated to 1000 chars with an ellipsis marker)",
+    )
     resolve.add_argument("--json", action="store_true", help="emit JSON")
 
     countersign = subparsers.add_parser(
@@ -191,7 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--format", choices=["json", "html"], default="json")
     export.add_argument("--output", type=Path, default=None, help="output path (default: stdout)")
-    export.add_argument("--json", action="store_true", help="emit JSON (stats envelope)")
+    export.add_argument("--json", action="store_true", help="emit JSON (only with --format json)")
 
     stats = subparsers.add_parser("stats", help="operational counts over a journal")
     stats.add_argument("--journal", type=Path, default=None, help="journal path")
@@ -210,23 +256,40 @@ def build_parser() -> argparse.ArgumentParser:
     archive.add_argument("--journal", type=Path, default=None, help="journal path")
     archive.add_argument(
         "--keep",
-        type=int,
+        type=_positive_int,
         default=None,
-        help="retain only the newest N archives (oldest deleted)",
+        help="retain only the newest N archives (oldest deleted; destroys evidence)",
     )
     archive.add_argument("--json", action="store_true", help="emit JSON")
 
     return parser
 
 
+def _positive_int(raw: str) -> int:
+    """Argparse type for ``--keep``: only positive counts prune safely."""
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {raw!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"--keep must be positive, got {value}")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "export" and args.json and args.format == "html":
+        parser.error("--json cannot be combined with --format html (pick one output)")
     try:
         if args.command == "verify":
             return _cmd_verify(args)
         if args.command == "verify-chain":
             return _cmd_verify_chain(args)
+        if args.command == "witness":
+            return _cmd_witness(args)
+        if args.command == "witness-audit":
+            return _cmd_witness_audit(args)
         if args.command == "key-info":
             return _cmd_key_info(args)
         if args.command == "key-rotate":
@@ -376,6 +439,7 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         "decision_count": report.decision_count,
         "outcome_count": report.outcome_count,
         "safe_for_upload": report.safe_for_upload,
+        "disclosing_outcome_event_ids": list(report.disclosing_outcome_event_ids),
         "actions": [
             {
                 "action_name": action.action_name,
@@ -404,10 +468,15 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
             print(f"    discloses:      {', '.join(action.retained_parameter_names)}")
         print(f"    {action.explanation}")
     print()
+    if report.disclosing_outcome_event_ids:
+        print(
+            "  Outcome disclosures (receipts or error summaries) in: "
+            + ", ".join(report.disclosing_outcome_event_ids)
+        )
     if report.safe_for_upload:
-        print("  Every recorded argument is redacted.")
+        print("  Every recorded argument is redacted and no outcome discloses values.")
     else:
-        print("  Some arguments are recorded in the clear. Review before sharing.")
+        print("  Some arguments or outcome values are recorded. Review before sharing.")
     return EXIT_OK
 
 
@@ -552,6 +621,7 @@ def _cmd_countersign(args: argparse.Namespace) -> int:
         "checkpoint_count": report.checkpoint_count,
         "head_sha256": report.head_sha256,
         "key_id": report.countersignature_event["key_id"],
+        "superseded": report.superseded,
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -560,6 +630,8 @@ def _cmd_countersign(args: argparse.Namespace) -> int:
         print(f"  events committed: {report.checkpoint_count}")
         print(f"  head sha256:      {report.head_sha256}")
         print(f"  counter key_id:   {report.countersignature_event['key_id']}")
+        if report.superseded:
+            print("  WARNING: a newer checkpoint exists; re-run countersign to attest it")
     return EXIT_OK
 
 
@@ -601,19 +673,21 @@ def _cmd_export(args: argparse.Namespace) -> int:
         _fail("no trusted verification keys found", as_json=args.json)
         return EXIT_FAILURE
     bundle = export_journal(journal_path, keys)
+    valid = bundle["verification"]["valid"] and (bundle["audit"] or {}).get(
+        "structurally_valid", False
+    )
     if args.output is not None:
         write_pack(bundle, args.output, args.format)
         print(f"Wrote {args.format} evidence pack to {args.output}")
-        return EXIT_OK
+        if not valid:
+            print("WARNING: the pack records a failed verification or audit", file=sys.stderr)
+        return EXIT_OK if valid else EXIT_FAILURE
     if args.format == "html":
         from .export import render_html
 
         print(render_html(bundle))
     else:
         print(json.dumps(bundle, indent=2, sort_keys=True))
-    valid = bundle["verification"]["valid"] and (bundle["audit"] or {}).get(
-        "structurally_valid", False
-    )
     return EXIT_OK if valid else EXIT_FAILURE
 
 
@@ -718,6 +792,86 @@ def _cmd_verify_chain(args: argparse.Namespace) -> int:
         print(f"FAIL  {journal_path}")
         for issue in report.issues:
             print(f"      {issue.file}: [{issue.code}] {issue.message}")
+    return EXIT_OK if report.valid else EXIT_FAILURE
+
+
+def _cmd_witness(args: argparse.Namespace) -> int:
+    from .witness import witness_journal
+
+    journal_path = args.journal or default_journal_path()
+    report = witness_journal(
+        journal_path,
+        args.witness_dir,
+        counter_key=args.counter_key,
+        counter_password=_password_from_env(args.password_env),
+    )
+    payload = {
+        "journal": str(journal_path),
+        "checkpoint_event_id": report.checkpoint_event_id,
+        "checkpoint_count": report.checkpoint_count,
+        "head_sha256": report.head_sha256,
+        "witness_path": str(report.witness_path),
+        "shipped_path": str(report.shipped_path),
+        "countersignature_event_id": report.countersignature_event_id,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Witnessed {journal_path}")
+        print(f"  events committed: {report.checkpoint_count}")
+        print(f"  shipped witness:  {report.shipped_path}")
+        print("  Verify later with")
+        print(f"    interceptor verify --checkpoint {report.shipped_path}")
+        if report.countersignature_event_id is not None:
+            print(f"  countersigned:    {report.countersignature_event_id}")
+    return EXIT_OK
+
+
+def _cmd_witness_audit(args: argparse.Namespace) -> int:
+    from .witness import audit_witnesses
+
+    journal_path = args.journal or default_journal_path()
+    if not journal_path.exists():
+        _fail(f"no journal at {journal_path}", as_json=args.json)
+        return EXIT_FAILURE
+    try:
+        keys = _resolve_verification_keys(args)
+    except InterceptorError as exc:
+        _fail(str(exc), as_json=args.json)
+        return EXIT_FAILURE
+    if not keys:
+        _fail(
+            "no trusted verification keys found; run `key-info` to create an "
+            "identity or pass --public-key",
+            as_json=args.json,
+        )
+        return EXIT_FAILURE
+    report = audit_witnesses(args.witness_dir, journal_path, keys)
+    payload = {
+        "journal": str(journal_path),
+        "witness_dir": str(report.witness_dir),
+        "valid": report.valid,
+        "files": [
+            {
+                "path": str(item.path),
+                "checkpoint_count": item.checkpoint_count,
+                "covered": item.covered,
+                "detail": item.detail,
+            }
+            for item in report.files
+        ],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    elif report.valid:
+        print(f"OK  {journal_path} covers {len(report.files)} shipped witness(es)")
+        for item in report.files:
+            print(f"    covered {item.path} (count {item.checkpoint_count})")
+    else:
+        print(f"FAIL  {journal_path}")
+        for item in report.files:
+            state = "covered" if item.covered else "UNCOVERED"
+            print(f"      {state} {item.path} {item.detail}")
     return EXIT_OK if report.valid else EXIT_FAILURE
 
 
