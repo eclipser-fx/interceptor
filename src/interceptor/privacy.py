@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -60,25 +61,40 @@ class EvidencePrivacyReport:
     failed_count: int
     classifications: PrivacyClassificationCounts
     actions: tuple[ActionPrivacyInspection, ...]
+    disclosing_outcome_event_ids: tuple[str, ...]
     safe_for_upload: bool
 
 
 def inspect_journal(
     journal_path: Path | None = None,
     *,
-    public_key_path: Path | None = None,
+    public_key_path: Path | Sequence[Path] | None = None,
 ) -> EvidencePrivacyReport:
     """Verify and inspect a journal locally, without network activity or writes.
 
     Verification uses the trusted key set from the evidence home unless
-    *public_key_path* pins a single key explicitly.
+    *public_key_path* pins explicit keys (one path or a list, e.g. across a
+    key rotation).
     """
     journal = journal_path or default_journal_path()
     if not journal.exists():
         raise EvidencePrivacyInspectionError("journal not found; no inspection was performed")
     try:
         if public_key_path is not None:
-            public_keys: PublicKeys = (load_public_key(public_key_path),)
+            paths = (
+                [public_key_path] if isinstance(public_key_path, Path) else list(public_key_path)
+            )
+            if not paths:
+                raise EvidencePrivacyInspectionError(
+                    "no verification keys pinned; no inspection was performed"
+                )
+            try:
+                public_keys: PublicKeys = tuple(load_public_key(p) for p in paths)
+            except (IdentityError, OSError) as exc:
+                raise EvidencePrivacyInspectionError(
+                    f"pinned verification key is unavailable or invalid ({exc}); "
+                    "no inspection was performed"
+                ) from None
         else:
             public_keys = load_trusted_public_keys(evidence_home())
         if not public_keys:
@@ -102,8 +118,14 @@ def inspect_journal(
 
 
 def inspect_verified_snapshot(snapshot: JournalSnapshot) -> EvidencePrivacyReport:
-    """Classify argument retention in an already verified journal snapshot."""
+    """Classify argument retention in an already verified journal snapshot.
+
+    Decisions carry the argument classification; outcomes are scanned for
+    disclosures the decision classifier cannot see — provider receipts and
+    failure error summaries, both of which can echo values into evidence.
+    """
     actions: list[ActionPrivacyInspection] = []
+    disclosing_outcomes: list[str] = []
     decision_count = outcome_count = 0
     allowed_count = denied_count = 0
     succeeded_count = failed_count = 0
@@ -127,6 +149,9 @@ def inspect_verified_snapshot(snapshot: JournalSnapshot) -> EvidencePrivacyRepor
             outcome_count += 1
             succeeded_count += event.get("status") == "succeeded"
             failed_count += event.get("status") == "failed"
+            if _outcome_discloses(event):
+                event_id = event.get("event_id")
+                disclosing_outcomes.append(event_id if isinstance(event_id, str) else "<unknown>")
 
     counts = PrivacyClassificationCounts(
         fully_redacted=sum(
@@ -140,7 +165,7 @@ def inspect_verified_snapshot(snapshot: JournalSnapshot) -> EvidencePrivacyRepor
         ),
         unknown=sum(action.classification is PrivacyClassification.UNKNOWN for action in actions),
     )
-    safe = counts.partially_redacted == 0 and counts.unknown == 0
+    safe = counts.partially_redacted == 0 and counts.unknown == 0 and not disclosing_outcomes
     return EvidencePrivacyReport(
         policy="ordinary_connected_upload",
         event_count=len(snapshot.events),
@@ -152,8 +177,24 @@ def inspect_verified_snapshot(snapshot: JournalSnapshot) -> EvidencePrivacyRepor
         failed_count=failed_count,
         classifications=counts,
         actions=tuple(actions),
+        disclosing_outcome_event_ids=tuple(disclosing_outcomes),
         safe_for_upload=safe,
     )
+
+
+def _outcome_discloses(event: dict[str, Any]) -> bool:
+    """Whether an outcome event carries values beyond hashes and type names.
+
+    Provider receipts are transcribed external IDs; failure error summaries are
+    bounded and scrubbed of redacted values but can still echo non-redacted
+    inputs. Output hashes alone do not disclose (with the documented
+    low-entropy caveat, which redaction — not inspection — addresses).
+    """
+    receipt = event.get("receipt")
+    if isinstance(receipt, dict) and receipt:
+        return True
+    summary = event.get("sanitized_error_summary")
+    return isinstance(summary, str) and bool(summary)
 
 
 _RETENTION_STATES = frozenset({"redacted", "retained", "unsupported"})
@@ -209,7 +250,8 @@ def _classify_retention(
         return (
             PrivacyClassification.UNKNOWN,
             tuple(sorted(names)),
-            "one or more arguments use an unsupported type placeholder",
+            "one or more arguments use an unsupported type placeholder "
+            "(or a value resembling one — markers are display hints, not proofs)",
         )
     if "retained" in states:
         retained = [name for name, state in zip(names, states, strict=True) if state == "retained"]
@@ -255,7 +297,8 @@ def _classify_summary(
         return (
             PrivacyClassification.UNKNOWN,
             tuple(sorted((*retained, *unsupported))),
-            "one or more arguments use an unsupported type placeholder",
+            "one or more arguments use an unsupported type placeholder "
+            "(or a value resembling one — markers are display hints, not proofs)",
         )
     if retained:
         return (
