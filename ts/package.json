@@ -1,0 +1,24 @@
+{
+  "name": "interceptor-effect",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Approval-gated, tamper-evident evidence for consequential function calls — Effect/TypeScript sibling of the Python interceptor.",
+  "license": "MIT",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "vectors": "vitest run test/vectors.test.ts"
+  },
+  "dependencies": {
+    "effect": "^3.22.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.0",
+    "typescript": "^5.6.3",
+    "vitest": "^3.0.0"
+  }
+}
