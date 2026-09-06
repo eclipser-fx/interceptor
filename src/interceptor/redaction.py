@@ -144,9 +144,17 @@ def scrub_text(
 
     Longer values are substituted first: replacing a short value that happens
     to be a substring of a longer one would otherwise fragment the longer one
-    and leave parts of it in the text.
+    and leave parts of it in the text. Values shorter than
+    :data:`interceptor.canonical._MIN_SCRUBBABLE_LENGTH` are skipped: they
+    produce far more spurious replacements than useful scrubbing.
     """
-    for raw in sorted({v for v in redacted_values if v}, key=len, reverse=True):
+    from .canonical import _MIN_SCRUBBABLE_LENGTH
+
+    for raw in sorted(
+        {v for v in redacted_values if v and len(v) >= _MIN_SCRUBBABLE_LENGTH},
+        key=len,
+        reverse=True,
+    ):
         text = text.replace(raw, REDACTED)
     for pattern in patterns:
         text = pattern.sub(REDACTED, text)
