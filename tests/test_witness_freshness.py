@@ -103,6 +103,22 @@ def test_bad_args_rejected(tmp_path: Path):
         WitnessFreshnessProvider(tmp_path, 60, witness_filename="sub/dir")
 
 
+def test_witness_path_is_dir_denies(tmp_path: Path):
+    now = time.time()
+    (tmp_path / "latest.checkpoint").mkdir()
+    provider = WitnessFreshnessProvider(tmp_path, 300, clock=lambda: now)
+    assert not provider.decide(_req()).allowed
+
+
+def test_custom_filename(tmp_path: Path):
+    now = time.time()
+    _touch(tmp_path / "custom.checkpoint", mtime=now - 5)
+    provider = WitnessFreshnessProvider(
+        tmp_path, 300, clock=lambda: now, witness_filename="custom.checkpoint"
+    )
+    assert provider.decide(_req()).allowed
+
+
 def test_guard_denies_and_records_when_stale(evidence_home: Path, tmp_path: Path):
     now = time.time()
     witness_dir = tmp_path / "witness"
