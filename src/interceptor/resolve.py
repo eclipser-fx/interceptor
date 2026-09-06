@@ -12,7 +12,12 @@ hash chain:
 A resolution is an operator attestation, not proof: it says a human checked
 the external system, nothing more. But it turns the reconciliation queue from
 a dead end into a closed loop, and ``audit`` clears resolved invocations from
-``needs_reconciliation`` accordingly.
+``needs_reconciliation`` accordingly. A ``confirmed_not_completed`` resolution
+additionally releases an idempotency key for retry.
+
+The referenced decision is located by id match over the live journal without
+full verification (which happens at ``verify``/``audit`` time): resolve into
+a journal you have verified, or not at all.
 """
 
 from __future__ import annotations
@@ -62,7 +67,8 @@ def resolve_journal(
         )
     if not isinstance(note, str):
         raise ResolutionError("resolution note must be a string")
-    note = note[:_MAX_NOTE_CHARS]
+    if len(note) > _MAX_NOTE_CHARS:
+        note = note[: _MAX_NOTE_CHARS - 1] + "…"
 
     journal = Path(path)
     decision = _find_decision(journal, decision_event_id)
@@ -71,6 +77,10 @@ def resolve_journal(
     if decision.get("decision") != "allowed":
         raise ResolutionError(
             f"decision {decision_event_id!r} was not allowed; nothing to reconcile"
+        )
+    if decision.get("dry_run") is True:
+        raise ResolutionError(
+            f"decision {decision_event_id!r} was a dry run and never executed; nothing to reconcile"
         )
 
     signer = identity or LocalSigningIdentity.load_or_create()
