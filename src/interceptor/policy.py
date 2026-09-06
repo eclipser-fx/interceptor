@@ -862,6 +862,95 @@ class AttestedApprovalProvider:
         return ApprovalDecision(decision.decision, decision.reason, approved_by=stamped)
 
 
+class WitnessFreshnessProvider:
+    """Deny unless the off-host witness is fresh.
+
+    Tail truncation is undetectable from the journal alone; only a witness
+    that left the machine bounds it (see ``docs/THREAT_MODEL.md``). This
+    provider turns that operational requirement into an approval gate: it
+    stats ``witness_dir/latest.checkpoint`` (written by
+    :func:`interceptor.witness.witness_journal`) and denies when the witness
+    is missing or older than *max_age_seconds*.
+
+    *risks* optionally restricts enforcement to a risk subset (e.g.
+    ``{"high", "critical"}``); other risks allow with a reason stating the
+    gate did not apply. This composes with declarative policy::
+
+        AllOf([RuleProvider(...), WitnessFreshnessProvider(dir, 300,
+              risks={"high", "critical"})])
+
+    The default clock is :func:`time.time` (wall clock, to compare against
+    filesystem mtime — not monotonic). Inject a stub clock in tests. All
+    filesystem errors fail closed (deny). Thread-safe (stateless).
+    """
+
+    def __init__(
+        self,
+        witness_dir: str | Path,
+        max_age_seconds: float,
+        *,
+        risks: Collection[str] | None = None,
+        clock: Callable[[], float] | None = None,
+        witness_filename: str = "latest.checkpoint",
+    ) -> None:
+        if max_age_seconds <= 0:
+            raise ValueError("max_age_seconds must be positive")
+        if not witness_filename or "/" in witness_filename or "\\" in witness_filename:
+            raise ValueError("witness_filename must be a plain file name")
+        risk_set: frozenset[str] | None = None
+        if risks is not None:
+            risk_set = frozenset(risks)
+            unknown = risk_set - set(RISK_LEVELS)
+            if unknown:
+                raise ValueError(
+                    f"unknown risks {sorted(unknown)}; expected one of {list(RISK_LEVELS)}"
+                )
+        self._witness_dir = Path(witness_dir)
+        self._max_age = max_age_seconds
+        self._risks = risk_set
+        self._clock = clock or time.time
+        self._witness_filename = witness_filename
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        if self._risks is not None and request.risk not in self._risks:
+            return ApprovalDecision(
+                DECISION_ALLOWED,
+                f"witness freshness not required for risk {request.risk!r}",
+            )
+        witness = self._witness_dir / self._witness_filename
+        try:
+            mtime = witness.stat().st_mtime
+        except FileNotFoundError:
+            return ApprovalDecision(
+                DECISION_DENIED,
+                f"no witness at {witness} (run `interceptor witness`); failing closed",
+            )
+        except NotADirectoryError as exc:
+            return ApprovalDecision(
+                DECISION_DENIED, f"witness dir unavailable ({exc}); failing closed"
+            )
+        except OSError as exc:
+            return ApprovalDecision(DECISION_DENIED, f"witness unavailable ({exc}); failing closed")
+        try:
+            now = self._clock()
+        except Exception as exc:
+            return ApprovalDecision(
+                DECISION_DENIED, f"witness clock failed ({exc!r}); failing closed"
+            )
+        age = now - mtime
+        if age < 0:
+            age = 0
+        if age > self._max_age:
+            return ApprovalDecision(
+                DECISION_DENIED,
+                f"witness stale ({age:.0f}s old, max {self._max_age:g}s); "
+                "run `interceptor witness`; failing closed",
+            )
+        return ApprovalDecision(
+            DECISION_ALLOWED, f"witness fresh ({age:.0f}s old, max {self._max_age:g}s)"
+        )
+
+
 def load_policy_file(path: str | Path) -> RuleProvider:
     """Load a declarative policy from a JSON file.
 
