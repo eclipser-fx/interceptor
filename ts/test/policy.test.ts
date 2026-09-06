@@ -188,6 +188,35 @@ describe("RuleProvider and loadPolicyFile", () => {
   });
 });
 
+describe("DurableBudgetProvider", () => {
+  it("survives restarts and denies without consuming", async () => {
+    const { DurableBudgetProvider } = await import("../src/Policy.js");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "ic-db-"));
+    const state = path.join(dir, "budget.json");
+    const first = new DurableBudgetProvider(2, state);
+    expect((await Effect.runPromise(first.decide(req))).decision).toBe("allowed");
+    expect((await Effect.runPromise(first.decide(req))).decision).toBe("allowed");
+    expect((await Effect.runPromise(first.decide(req))).decision).toBe("denied");
+    // New instance = restarted process: the budget persists...
+    const second = new DurableBudgetProvider(2, state);
+    expect((await Effect.runPromise(second.decide(req))).decision).toBe("denied");
+    // ...and the denied burst above consumed nothing extra (still exactly 2).
+    const raw = JSON.parse(readFileSync(state, "utf8")) as Record<string, unknown>;
+    expect(raw["total"]).toBe(2);
+  });
+
+  it("fails closed on corrupt state", async () => {
+    const { DurableBudgetProvider } = await import("../src/Policy.js");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "ic-dbcor-"));
+    const state = path.join(dir, "budget.json");
+    writeFileSync(state, "{not json");
+    const exit = await Effect.runPromise(
+      Effect.exit(new DurableBudgetProvider(5, state).decide(req)),
+    );
+    expect(exit._tag).toBe("Failure");
+  });
+});
+
 describe("AttestedApprovalProvider", () => {
   it("stamps allowances, passes denials, fails closed without identity", async () => {
     const stamped = await Effect.runPromise(
