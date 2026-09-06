@@ -20,7 +20,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from interceptor import audit_journal
 from interceptor.verification import verify_journal
 
-VECTORS = sorted((Path(__file__).resolve().parent.parent / "verifiers" / "vectors" / "v1").glob("*.json"))
+VECTORS_DIR = Path(__file__).resolve().parent.parent / "verifiers" / "vectors" / "v1"
+VECTORS = sorted(VECTORS_DIR.glob("*.json"))
 VERIFIER = Path(__file__).resolve().parent.parent / "verifiers" / "node" / "verify.mjs"
 NODE = shutil.which("node")
 
@@ -32,7 +33,7 @@ def _load(vector: Path, tmp_path: Path) -> tuple[Path, list[Ed25519PublicKey], d
     journal = tmp_path / f"{vector.stem}.jsonl"
     journal.write_text("\n".join(payload["journal"]) + "\n")
     keys = []
-    for index, pem in enumerate(payload["public_keys"]):
+    for pem in payload["public_keys"]:
         key = serialization.load_pem_public_key(pem.encode("ascii"))
         assert isinstance(key, Ed25519PublicKey)
         keys.append(key)
