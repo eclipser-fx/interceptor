@@ -15,7 +15,7 @@ import os
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,7 @@ from .approval import (
     ApprovalProvider,
     ApprovalRequest,
 )
+from .contracts import RISK_LEVELS
 from .errors import PolicyError
 
 Predicate = Callable[[ApprovalRequest], bool]
@@ -59,9 +60,9 @@ class AllowListProvider(PredicateProvider):
 
     def __init__(
         self,
-        actions: set[str] | frozenset[str],
+        actions: Collection[str],
         *,
-        risks: set[str] | frozenset[str] | None = None,
+        risks: Collection[str] | None = None,
     ) -> None:
         action_set = frozenset(actions)
         risk_set = frozenset(risks) if risks is not None else None
@@ -77,8 +78,8 @@ class AllowListProvider(PredicateProvider):
 class BudgetProvider:
     """Allow at most *max_calls* invocations (optionally per action).
 
-    Counts every ``decide`` call that reaches this provider, allowed or not,
-    so a denied burst cannot be retried into an allowance. Thread-safe.
+    Each allowance consumes one unit; denials at an exhausted budget consume
+    nothing further (there is nothing left to protect). Thread-safe.
     When *per_action* is true each action name gets its own budget.
     """
 
@@ -124,9 +125,9 @@ class BudgetProvider:
 class RateLimitProvider:
     """Sliding-window rate limit: at most *max_calls* per *window_seconds*.
 
-    Denials also consume no quota beyond the attempt itself — the window
-    counts attempts, so bursts cannot evade the limit by being denied first.
-    Thread-safe; the clock is injectable for tests.
+    Only allowances enter the window; denials consume no quota, so a denied
+    burst does not extend the throttle. Thread-safe; the clock is injectable
+    for tests.
     """
 
     def __init__(
@@ -162,11 +163,17 @@ class RateLimitProvider:
 
 
 class CachedApprovalProvider:
-    """Cache ``allowed`` decisions for *ttl_seconds*, keyed by contract+input.
+    """Cache ``allowed`` decisions for *ttl_seconds*.
 
-    Repeated identical calls within the TTL auto-allow without re-prompting;
-    every invocation still writes its own decision/outcome evidence. Denials
-    are never cached. Thread-safe.
+    The key covers contract, redacted input, risk, approval mode, and declared
+    spend, so a cached allow never crosses a risk or budget boundary. Repeated
+    identical calls within the TTL auto-allow without re-prompting; every
+    invocation still writes its own decision/outcome evidence. Denials are
+    never cached. Thread-safe.
+
+    Composition order matters: put stateful limits *outside* the cache —
+    ``Budget(Cached(inner))`` — so the budget sees every call. Reversing them
+    lets the TTL re-allow calls the inner budget would now deny.
     """
 
     def __init__(
@@ -186,10 +193,16 @@ class CachedApprovalProvider:
         self._clock = clock or time.monotonic
         self._max_entries = max_entries
         self._lock = threading.Lock()
-        self._cache: dict[tuple[str, str], float] = {}
+        self._cache: dict[tuple[str, str, str, str, int | None], float] = {}
 
     def decide(self, request: ApprovalRequest) -> ApprovalDecision:
-        key = (request.contract_hash, request.input_hash)
+        key = (
+            request.contract_hash,
+            request.input_hash,
+            request.risk,
+            request.approval_mode,
+            request.spend_cents,
+        )
         now = self._clock()
         with self._lock:
             expires = self._cache.get(key)
@@ -223,6 +236,9 @@ class TimeoutApprovalProvider:
 
     Runs the inner ``decide`` on a daemon thread; on expiry returns a denial
     (fail closed). The inner call may still complete later with no effect.
+    Denial reasons name the wrapped provider type, and at most
+    *max_in_flight* decisions wait at once — past that, calls deny as
+    overloaded rather than piling up threads without bound.
     """
 
     def __init__(
@@ -237,9 +253,11 @@ class TimeoutApprovalProvider:
         self._in_flight_guard = threading.Semaphore(max_in_flight)
 
     def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        inner_name = type(self._inner).__name__
         if not self._in_flight_guard.acquire(blocking=False):
             return ApprovalDecision(
-                DECISION_DENIED, "approval overloaded; failing closed (too many pending)"
+                DECISION_DENIED,
+                f"approval overloaded waiting on {inner_name}; failing closed (too many pending)",
             )
         result: dict[str, Any] = {}
         done = threading.Event()
@@ -255,12 +273,15 @@ class TimeoutApprovalProvider:
                 done.set()
                 self._in_flight_guard.release()
 
-        worker = threading.Thread(target=_run, daemon=True)
+        worker = threading.Thread(
+            target=_run, daemon=True, name=f"interceptor-approval-{inner_name}"
+        )
         worker.start()
         if not done.wait(self._timeout):
             return ApprovalDecision(
                 DECISION_DENIED,
-                f"approval timed out after {self._timeout:g}s; failing closed",
+                f"approval timed out after {self._timeout:g}s waiting on {inner_name}; "
+                "failing closed (the inner call may still complete with no effect)",
             )
         decision = result.get("decision")
         if not isinstance(decision, ApprovalDecision):
@@ -319,8 +340,10 @@ class QuorumApprovalProvider:
 
     Every provider is always consulted (no short-circuit), so each one records
     its own audit trail; denials name how many approvals were missing.
-    Provider exceptions count as denials. Thread-safe where the wrapped
-    providers are.
+    Provider exceptions count as denials (named as ``errored (...)`` in the
+    reason) rather than raising ``ApprovalError`` the way ``AllOf``/``AnyOf``
+    do — monitor denial reasons, not just exception types, for failing
+    providers behind a quorum. Thread-safe where the wrapped providers are.
     """
 
     def __init__(self, providers: list[ApprovalProvider], quorum: int) -> None:
@@ -423,15 +446,72 @@ def _state_lock(path: Path) -> threading.Lock:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write *payload* atomically (tmp + fsync + replace)."""
+    """Write *payload* atomically (exclusive tmp + fsync + replace).
+
+    The temp file is created with ``O_EXCL`` semantics via :mod:`tempfile`, so
+    a crashed predecessor's leftovers can never be mistaken for state: only
+    ``os.replace`` publishes a complete write.
+    """
+    import tempfile as _tempfile
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    with open(tmp, "wb") as handle:
-        handle.write(data + b"\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    fd, tmp_name = _tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _lock_exclusive(handle: Any) -> bool:
+    """Take an exclusive OS lock on *handle*; False where unavailable.
+
+    Mirrors the journal's platform strategy (``fcntl`` on POSIX, ``msvcrt`` on
+    Windows). Callers proceed unlocked when this returns False and document
+    that degradation (concurrent writers can over-allow) rather than denying
+    outright, which would turn every exotic platform into a total denial of
+    service. Corrupt or unwritable state still fails closed.
+    """
+    try:
+        if os.name == "posix":
+            import fcntl as _fcntl
+
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        elif os.name == "nt":
+            import msvcrt as _msvcrt
+
+            handle.seek(0)
+            # typeshed omits locking/LK_*; the Windows branch cannot be exercised here.
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
+        else:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _unlock_shared(handle: Any) -> None:
+    try:
+        if os.name == "posix":
+            import fcntl as _fcntl
+
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        elif os.name == "nt":
+            import msvcrt as _msvcrt
+
+            handle.seek(0)
+            # typeshed omits locking/LK_*; the Windows branch cannot be exercised here.
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+    except Exception:  # noqa: S110 - best-effort unlock
+        pass
 
 
 def _read_json_state(path: Path) -> dict[str, Any] | None:
@@ -455,9 +535,11 @@ class FileBudgetProvider:
     """Durable budget: at most *max_calls* invocations, surviving restarts.
 
     State lives in *state_path* as JSON (``{"total": N, "per_action": {..}}``),
-    updated under an OS file lock so concurrent processes share one budget.
-    Counts every ``decide`` that reaches this provider, like
-    :class:`BudgetProvider`. Corrupt or unwritable state fails closed (deny).
+    updated under an OS file lock (``fcntl`` on POSIX, ``msvcrt`` on Windows)
+    so concurrent processes share one budget. Each allowance consumes one
+    unit, like :class:`BudgetProvider`. Corrupt or unwritable state fails
+    closed (deny); on platforms with no OS locks, concurrent writers can
+    over-allow — the same documented degradation as the journal itself.
     """
 
     def __init__(self, max_calls: int, state_path: str | Path, *, per_action: bool = False) -> None:
@@ -476,13 +558,7 @@ class FileBudgetProvider:
                 # cannot drop mutual exclusion mid-update.
                 lockfile = self._state_path.with_name(f"{self._state_path.name}.lock")
                 with open(lockfile, "a+b") as handle:
-                    try:
-                        import fcntl as _fcntl
-
-                        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
-                        locked = True
-                    except Exception:
-                        locked = False
+                    locked = _lock_exclusive(handle)
                     try:
                         state = _read_json_state(self._state_path)
                         if state is None:
@@ -522,12 +598,7 @@ class FileBudgetProvider:
                         )
                     finally:
                         if locked:
-                            try:
-                                import fcntl as _fcntl2
-
-                                _fcntl2.flock(handle.fileno(), _fcntl2.LOCK_UN)
-                            except Exception:  # noqa: S110 - best-effort unlock
-                                pass
+                            _unlock_shared(handle)
             except PolicyError as exc:
                 return ApprovalDecision(DECISION_DENIED, f"{exc}; failing closed")
             except OSError as exc:
@@ -541,9 +612,11 @@ class FileBudgetProvider:
 class FileRateLimitProvider:
     """Durable sliding-window rate limit shared across processes/restarts.
 
-    Attempt timestamps live in *state_path* as JSON (``{"attempts": [...]}``).
+    Attempt timestamps live in *state_path* as JSON (``{"attempts": [...]}``),
+    updated under an OS file lock (``fcntl`` on POSIX, ``msvcrt`` on Windows).
     Only allowed attempts are recorded, matching :class:`RateLimitProvider`.
-    Corrupt or unwritable state fails closed (deny).
+    Corrupt or unwritable state fails closed (deny); on platforms with no OS
+    locks, concurrent writers can over-allow.
     """
 
     def __init__(
@@ -571,13 +644,7 @@ class FileRateLimitProvider:
                 self._state_path.parent.mkdir(parents=True, exist_ok=True)
                 lockfile = self._state_path.with_name(f"{self._state_path.name}.lock")
                 with open(lockfile, "a+b") as handle:
-                    try:
-                        import fcntl as _fcntl
-
-                        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
-                        locked = True
-                    except Exception:
-                        locked = False
+                    locked = _lock_exclusive(handle)
                     try:
                         state = _read_json_state(self._state_path)
                         attempts: list[float] = []
@@ -601,12 +668,7 @@ class FileRateLimitProvider:
                         return ApprovalDecision(DECISION_ALLOWED, "within rate limit")
                     finally:
                         if locked:
-                            try:
-                                import fcntl as _fcntl2
-
-                                _fcntl2.flock(handle.fileno(), _fcntl2.LOCK_UN)
-                            except Exception:  # noqa: S110 - best-effort unlock
-                                pass
+                            _unlock_shared(handle)
             except PolicyError as exc:
                 return ApprovalDecision(DECISION_DENIED, f"{exc}; failing closed")
             except OSError as exc:
@@ -668,9 +730,10 @@ class FileSpendingBudgetProvider:
     """Durable spending budget shared across processes and restarts.
 
     Totals live in *state_path* as JSON (``{"total": C, "per_action": {..}}``),
-    updated under a sidecar lock file. Like :class:`SpendingBudgetProvider`,
-    calls with no declared spend are denied. Corrupt or unwritable state fails
-    closed (deny).
+    updated under an OS-locked sidecar file (``fcntl`` on POSIX, ``msvcrt`` on
+    Windows). Like :class:`SpendingBudgetProvider`, calls with no declared
+    spend are denied. Corrupt or unwritable state fails closed (deny); on
+    platforms with no OS locks, concurrent writers can over-allow.
     """
 
     def __init__(self, max_cents: int, state_path: str | Path, *, per_action: bool = False) -> None:
@@ -692,13 +755,7 @@ class FileSpendingBudgetProvider:
                 self._state_path.parent.mkdir(parents=True, exist_ok=True)
                 lockfile = self._state_path.with_name(f"{self._state_path.name}.lock")
                 with open(lockfile, "a+b") as handle:
-                    try:
-                        import fcntl as _fcntl
-
-                        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
-                        locked = True
-                    except Exception:
-                        locked = False
+                    locked = _lock_exclusive(handle)
                     try:
                         state = _read_json_state(self._state_path)
                         if state is None:
@@ -744,12 +801,7 @@ class FileSpendingBudgetProvider:
                         )
                     finally:
                         if locked:
-                            try:
-                                import fcntl as _fcntl2
-
-                                _fcntl2.flock(handle.fileno(), _fcntl2.LOCK_UN)
-                            except Exception:  # noqa: S110 - best-effort unlock
-                                pass
+                            _unlock_shared(handle)
             except PolicyError as exc:
                 return ApprovalDecision(DECISION_DENIED, f"{exc}; failing closed")
             except OSError as exc:
@@ -798,11 +850,11 @@ class AttestedApprovalProvider:
             return ApprovalDecision(
                 DECISION_DENIED, "no approver identity configured; failing closed"
             )
-        stamped = identity.strip()
+        stamped = " ".join(identity.split())
         if (
             not stamped
             or len(stamped) > 120
-            or any(char.isspace() or ord(char) < 33 for char in stamped)
+            or any(ord(char) < 32 or ord(char) == 127 for char in stamped)
         ):
             return ApprovalDecision(
                 DECISION_DENIED, "approver identity is malformed; failing closed"
@@ -831,6 +883,12 @@ def load_policy_file(path: str | Path) -> RuleProvider:
         raise PolicyError(f"policy file {path} is not valid JSON: {exc}") from exc
     if not isinstance(raw, dict):
         raise PolicyError(f"policy file {path} must hold a JSON object")
+    unknown_top = set(raw) - {"default", "rules"}
+    if unknown_top:
+        raise PolicyError(
+            f"policy file {path}: unknown top-level keys {sorted(unknown_top)}; "
+            "expected 'default' and 'rules'"
+        )
     entries = raw.get("rules", [])
     if not isinstance(entries, list):
         raise PolicyError(f"policy file {path}: 'rules' must be a list")
@@ -838,6 +896,12 @@ def load_policy_file(path: str | Path) -> RuleProvider:
     for index, entry in enumerate(entries):
         if not isinstance(entry, Mapping):
             raise PolicyError(f"policy file {path}: rule {index} must be an object")
+        unknown_keys = set(entry) - {"action", "decision", "risks", "reason"}
+        if unknown_keys:
+            raise PolicyError(
+                f"policy file {path}: rule {index} has unknown keys {sorted(unknown_keys)}; "
+                "expected 'action', 'decision', 'risks', 'reason'"
+            )
         action = entry.get("action")
         decision = entry.get("decision")
         if not isinstance(action, str) or not action:
@@ -849,6 +913,12 @@ def load_policy_file(path: str | Path) -> RuleProvider:
         if risks is not None:
             if not isinstance(risks, list) or not all(isinstance(r, str) for r in risks):
                 raise PolicyError(f"policy file {path}: rule {index} 'risks' must be a string list")
+            unknown_risks = set(risks) - set(RISK_LEVELS)
+            if unknown_risks:
+                raise PolicyError(
+                    f"policy file {path}: rule {index} has unknown risks "
+                    f"{sorted(unknown_risks)}; expected one of {list(RISK_LEVELS)}"
+                )
             risk_set = frozenset(risks)
         reason = entry.get("reason", "")
         if not isinstance(reason, str):
