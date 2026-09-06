@@ -28,7 +28,7 @@ from .engine import (
     _make_async_wrapper,
     _make_sync_wrapper,
 )
-from .errors import ToolWrapError
+from .errors import ContractError, ToolWrapError
 from .guard import _is_async_callable, _is_generator_callable, _prepare_metadata
 from .identity import SigningIdentity
 from .journal import JournalStore
@@ -127,7 +127,9 @@ def wrap_tool(
             rejected.
         action: Stable logical action name (required).
         risk: ``low`` | ``medium`` | ``high`` | ``critical``.
-        approval: ``required`` (default) or ``never``.
+        approval: ``required`` (default) or ``never``. With ``never`` no
+            provider is consulted, so passing ``approval_provider`` alongside
+            it is a ``ToolWrapError`` rather than a silent no-op.
         journal: Journal path override or ``JournalStore`` implementation.
         redact: Additional parameter names to redact (case-insensitive).
         redact_patterns: Additional value regexes to redact.
@@ -148,6 +150,11 @@ def wrap_tool(
     """
     if not callable(func):
         raise ToolWrapError(f"wrap_tool expected a callable, got {type(func).__name__}")
+    if approval == "never" and approval_provider is not None:
+        raise ToolWrapError(
+            "approval='never' ignores any approval_provider; remove the provider or "
+            "use approval='required' so budgets, quorum, and attribution actually enforce"
+        )
     if hasattr(func, _CONTRACT_ATTR):
         raise ToolWrapError(
             f"cannot wrap {getattr(func, '__qualname__', _tool_name(func) or repr(func))!r}: "
@@ -257,6 +264,11 @@ def wrap_tools(
     """
     if configuration is None:
         configuration = _auto_configuration(tools, action_prefix, risk, defaults)
+    elif defaults:
+        raise ToolWrapError(
+            "wrap_tools: **defaults are only applied to auto-generated configuration; "
+            "pass an explicit `configuration` without defaults, or omit `configuration`"
+        )
     if isinstance(tools, Mapping):
         return _wrap_tools_mapping(tools, configuration)
     return _wrap_tools_sequence(tools, configuration)
@@ -351,4 +363,11 @@ def _wrap_one(
             f"(from tool {display_name!r}); action names must be unique"
         )
     seen_actions.add(action)
-    return wrap_tool(tool, **config_dict)
+    try:
+        return wrap_tool(tool, **config_dict)
+    except ToolWrapError:
+        raise
+    except ContractError as exc:
+        raise ToolWrapError(
+            f"wrap_tools: configuration for {display_name!r} is invalid: {exc}"
+        ) from exc
