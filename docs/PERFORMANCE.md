@@ -1,7 +1,9 @@
 # Performance envelope
 
 Measured with `benchmarks/bench.py` (ephemeral Ed25519 identity, temp journal,
-2 fsyncs per guarded call — one per event — on a 2024 laptop SSD):
+2 fsyncs per guarded call — one per event — on a 2024 laptop SSD). The bench
+is manual on purpose: wall-clock numbers are too noisy for a CI gate, so
+re-measure on your own hardware before capacity planning:
 
 | workload | append | verify |
 |---|---|---|
