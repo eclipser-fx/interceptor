@@ -97,7 +97,11 @@ unsupported-type placeholder (`"unsupported"`), or an ordinary value
 re-parsing `redacted_input_summary`, so a truncated or oddly-formatted summary
 cannot hide a retained argument. The field was added after the v1 summary
 format; journals without it are still verified and inspected via summary
-parsing.
+parsing. Markers are display hints, not proofs: a user string that happens to
+read `<unsupported:…>` is recorded verbatim but classified as unsupported, so
+inspection errs toward `unknown` (never shareable) rather than toward trust.
+`inspect` additionally flags outcomes carrying receipts or error summaries,
+which the decision classifier cannot see.
 
 `outcome` events add:
 
@@ -131,8 +135,12 @@ dropped rather than recorded, and never fail the call.
 A checkpoint commits to the journal's length at a point in time. It is signed
 and hash-chained like every other event, and its canonical JSON line is a
 self-contained **witness**: copied somewhere the journal cannot reach, it lets a
-verifier treat any journal shorter than `checkpoint_count` as truncated. See
-`THREAT_MODEL.md` for why tail truncation otherwise escapes offline detection.
+verifier treat any journal shorter than `checkpoint_count` as truncated. That
+bound covers only the prefix at or before the checkpoint — events appended
+*after* it can still be truncated down to (but never below) the committed
+count, and deleting the checkpoint itself removes the bound. Only an external
+witness with a larger count closes those gaps. See `THREAT_MODEL.md` for why
+tail truncation otherwise escapes offline detection.
 
 `resolution` events add (carrying the referenced decision's `action_id`,
 `action_name`, and `contract_hash`):
@@ -249,7 +257,9 @@ Signature and chain verification is necessary but does not establish that the
 events form a coherent invocation history. After cryptographic verification,
 the `audit` command applies these additional rules:
 
-- every `event_id` is unique;
+- every `event_id` is unique (audit-level check: cryptographic verification
+  covers content, linkage, and signatures, but not identifier uniqueness —
+  treat `verify`-valid as necessary but not sufficient, and always `audit`);
 - every outcome references an earlier decision;
 - every resolution references an earlier decision (else `orphan_resolution`);
 - conflicting resolutions for one decision are flagged (`conflicting_resolution`,
