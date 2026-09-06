@@ -228,6 +228,23 @@ All deny on exhaustion/error (fail closed) and perform no I/O. `CachedApprovalPr
 remembers identical `allowed` decisions for a TTL so repeats don't re-prompt —
 each call still writes its own decision/outcome evidence; denials are never cached.
 
+Enforce the witness schedule inside approval so a stale off-host witness blocks
+high-risk actions instead of merely paging afterwards:
+
+```python
+from interceptor import WitnessFreshnessProvider
+
+policy = AllOf(
+    [
+        BudgetProvider(100, per_action=True),
+        WitnessFreshnessProvider(
+            "/mnt/backup-witness", max_age_seconds=600,
+            risks={"high", "critical"},
+        ),
+    ]
+)
+```
+
 For policy-as-config instead of policy-as-code, use glob rules from a JSON file:
 
 ```json
