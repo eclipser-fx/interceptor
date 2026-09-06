@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
-from .errors import JournalError
+from .errors import EventShipError, JournalError
 from .journal import FileJournal
 
 #: What to do when a sink fails after the primary append succeeded.
@@ -74,6 +74,19 @@ class FileMirrorSink:
             raise JournalError(f"cannot mirror event to {self._path}: {exc}") from exc
 
 
+def _authorizing_decision(event: dict[str, Any]) -> str | None:
+    """The decision id this event answers to, for failure attribution.
+
+    Decisions carry their own id; outcomes and resolutions reference theirs.
+    Anything else yields None rather than a guess.
+    """
+    if event.get("event_type") == "decision":
+        event_id = event.get("event_id")
+        return event_id if isinstance(event_id, str) else None
+    ref = event.get("decision_event_id")
+    return ref if isinstance(ref, str) else None
+
+
 class FanoutJournalStore:
     """A :class:`JournalStore` that ships every event to sinks after writing.
 
@@ -116,9 +129,15 @@ class FanoutJournalStore:
         for sink in self._sinks:
             try:
                 sink.send(dict(event))
+            except EventShipError:
+                raise
             except Exception as exc:
                 if self._on_ship_failure == "raise":
-                    raise JournalError(f"event sink failed ({exc}); failing closed") from exc
+                    raise EventShipError(
+                        f"event {event.get('event_id')} persisted locally but a "
+                        f"witness sink failed ({exc}); failing closed",
+                        decision_event_id=_authorizing_decision(event),
+                    ) from exc
 
     def append_event(self, build: Callable[[str | None], dict[str, Any]]) -> dict[str, Any]:
         event = self._primary.append_event(build)
