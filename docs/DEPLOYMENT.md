@@ -38,6 +38,27 @@ Run `witness-audit` from a second host against its own synced copy: a journal
 that passes `verify` locally but leaves a shipped witness uncovered has a
 truncation (or a witness from another journal) — treat it as an incident.
 
+Enforce the schedule in-process as well: compose `WitnessFreshnessProvider`
+for `high`/`critical` actions so a missing witness or one older than
+`max_age_seconds` denies before execution (fail closed). Set the max to ~2×
+the cron interval; alerting stays on `verify`/`witness-audit`, the provider
+is the backstop:
+
+```python
+from interceptor import WitnessFreshnessProvider
+from interceptor.policy import AllOf
+
+policy = AllOf(
+    [
+        inner_policy,
+        WitnessFreshnessProvider(
+            "/mnt/backup-witness", max_age_seconds=600,
+            risks={"high", "critical"},
+        ),
+    ]
+)
+```
+
 ## 2. Rotate keys and journals
 
 - **Signing keys**: `interceptor key-rotate --journal <live>` quarterly or on
