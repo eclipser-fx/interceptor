@@ -63,6 +63,77 @@ GENESIS_PREVIOUS_HASH = None
 _process_locks: dict[str, threading.Lock] = {}
 _process_locks_guard = threading.Lock()
 
+#: Best-effort pre-check cache: resolved path -> (mtime_ns, size, per-query
+#: results). Entries are trusted only while the file stat is unchanged; the
+#: journal is append-only, so an unchanged size means unchanged content and
+#: any append invalidates the entry. This cache is a UX fast path only — the
+#: authoritative idempotency check always runs under the file lock at append
+#: time, so a stale entry can cost at most one redundant approval prompt.
+_PRECHECK_CACHE: dict[str, tuple[int, int, dict[tuple[str, str, str], dict[str, Any] | None]]] = {}
+_PRECHECK_CACHE_LOCK = threading.Lock()
+_PRECHECK_CACHE_MAX_KEYS = 1024
+
+
+def _precheck_token(path: Path) -> tuple[str, int, int] | None:
+    """(resolved path, mtime_ns, size) for cache validation, or None."""
+    try:
+        stat = path.stat()
+        return (str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
+def _precheck_cached(
+    token: tuple[str, int, int], kind: str, action_name: str, idempotency_key: str
+) -> tuple[bool, dict[str, Any] | None]:
+    """Cached prior decision for a pre-check query: (hit, prior-or-None).
+
+    The token must come from a stat taken *before* the scan it would replace:
+    the journal is append-only, so a matching token means unchanged content. A
+    file that grew mid-scan simply misses the cache and rescans — never wrong.
+    """
+    key = (kind, action_name, idempotency_key)
+    with _PRECHECK_CACHE_LOCK:
+        entry = _PRECHECK_CACHE.get(token[0])
+        if entry is None or (entry[0], entry[1]) != (token[1], token[2]):
+            return (False, None)
+        if key not in entry[2]:
+            return (False, None)
+        return (True, entry[2][key])
+
+
+def _precheck_store(
+    token: tuple[str, int, int],
+    kind: str,
+    action_name: str,
+    idempotency_key: str,
+    prior: dict[str, Any] | None,
+) -> None:
+    """Record a pre-check result, but only if the file has not grown since."""
+    key = (kind, action_name, idempotency_key)
+    with _PRECHECK_CACHE_LOCK:
+        try:
+            stat = Path(token[0]).stat()
+            current = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return
+        if current != (token[1], token[2]):
+            return  # grew mid-scan; do not cache a mix of two states
+        entry = _PRECHECK_CACHE.get(token[0])
+        if entry is None or (entry[0], entry[1]) != (token[1], token[2]):
+            entry = (token[1], token[2], {})
+            _PRECHECK_CACHE[token[0]] = entry
+        results = entry[2]
+        if len(results) >= _PRECHECK_CACHE_MAX_KEYS:
+            results.pop(next(iter(results)))
+        results[key] = prior
+
+
+def reset_precheck_cache() -> None:
+    """Forget cached pre-check results. For tests only."""
+    with _PRECHECK_CACHE_LOCK:
+        _PRECHECK_CACHE.clear()
+
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
@@ -331,8 +402,14 @@ def find_completed_idempotent_decision(
 
     Returns the prior decision event, or None. Corrupt lines are skipped (the
     chain is verified separately); only decision/outcome pairs that form a
-    completed success count — anything else must not block a retry.
+    completed success count — anything else must not block a retry. Results
+    are cached against the file stat (see :func:`_precheck_cached`).
     """
+    token = _precheck_token(path)
+    if token is not None:
+        hit, cached = _precheck_cached(token, "completed", action_name, idempotency_key)
+        if hit:
+            return cached
     decisions: dict[str, dict[str, Any]] = {}
     succeeded: set[str] = set()
     try:
@@ -358,6 +435,7 @@ def find_completed_idempotent_decision(
                             succeeded.add(ref)
     except OSError:
         return None
+    prior: dict[str, Any] | None = None
     for event_id, event in decisions.items():
         if (
             event.get("decision") == "allowed"
@@ -365,8 +443,11 @@ def find_completed_idempotent_decision(
             and event.get("idempotency_key") == idempotency_key
             and event_id in succeeded
         ):
-            return event
-    return None
+            prior = event
+            break
+    if token is not None:
+        _precheck_store(token, "completed", action_name, idempotency_key, prior)
+    return prior
 
 
 def _blocking_prior_from_state(
@@ -374,15 +455,26 @@ def _blocking_prior_from_state(
     outcomes_by_decision: dict[str, list[dict[str, Any]]],
     action_name: str,
     idempotency_key: str,
+    resolutions_by_decision: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any] | None:
     """Prior decision blocking a new execution, or None.
 
     Blocking means an ``allowed`` decision with the same action+key whose
     outcome is missing (in-progress, possibly crashed) or ``succeeded``.
     ``failed`` outcomes, ``denied`` decisions, and ``dry_run`` decisions never
-    block — retries after failure stay allowed. Returns the earliest blocking
-    decision so ``duplicate_of`` points at the original reservation.
+    block — retries after failure stay allowed. An operator resolution of
+    ``confirmed_not_completed`` also releases the key (the side effect was
+    checked and found absent), unless a ``succeeded`` outcome contradicts it —
+    that conflict stays blocking and is flagged by ``audit``. Returns the
+    earliest blocking decision so ``duplicate_of`` points at the original
+    reservation.
     """
+    resolved_clear: dict[str, bool] = {}
+    for decision_id, linked in (resolutions_by_decision or {}).items():
+        if linked:
+            resolved_clear[decision_id] = (
+                str(linked[-1].get("resolution")) == "confirmed_not_completed"
+            )
     for event_id, event in decisions.items():
         if (
             event.get("decision") != "allowed"
@@ -392,9 +484,11 @@ def _blocking_prior_from_state(
         ):
             continue
         linked = outcomes_by_decision.get(event_id, [])
-        if not linked:
-            return event
         if any(outcome.get("status") == "succeeded" for outcome in linked):
+            return event
+        if not linked and resolved_clear.get(event_id, False):
+            continue
+        if not linked:
             return event
         # Only failed outcomes linked: retry is safe.
     return None
@@ -410,6 +504,7 @@ def _scan_blocking_idempotent(
     """
     decisions: dict[str, dict[str, Any]] = {}
     outcomes: dict[str, list[dict[str, Any]]] = {}
+    resolutions: dict[str, list[dict[str, Any]]] = {}
     handle.seek(0)
     for raw in handle:
         line = raw.strip()
@@ -429,7 +524,13 @@ def _scan_blocking_idempotent(
             ref = event.get("decision_event_id")
             if isinstance(ref, str):
                 outcomes.setdefault(ref, []).append(event)
-    prior = _blocking_prior_from_state(decisions, outcomes, action_name, idempotency_key)
+        elif event.get("event_type") == "resolution":
+            ref = event.get("decision_event_id")
+            if isinstance(ref, str):
+                resolutions.setdefault(ref, []).append(event)
+    prior = _blocking_prior_from_state(
+        decisions, outcomes, action_name, idempotency_key, resolutions
+    )
     if prior is None:
         return None
     prior_id = prior.get("event_id")
@@ -443,10 +544,17 @@ def find_blocking_idempotent_decision(
 
     Unlocked (for avoiding an approval prompt); the authoritative check is
     :meth:`FileJournal.append_event_atomic` under lock. Returns the prior
-    decision event, or None.
+    decision event, or None. Results are cached against the file stat (see
+    :func:`_precheck_cached`).
     """
+    token = _precheck_token(path)
+    if token is not None:
+        hit, cached = _precheck_cached(token, "blocking", action_name, idempotency_key)
+        if hit:
+            return cached
     decisions: dict[str, dict[str, Any]] = {}
     outcomes: dict[str, list[dict[str, Any]]] = {}
+    resolutions: dict[str, list[dict[str, Any]]] = {}
     try:
         with open(path, "rb") as handle:
             for raw in handle:
@@ -467,9 +575,18 @@ def find_blocking_idempotent_decision(
                     ref = event.get("decision_event_id")
                     if isinstance(ref, str):
                         outcomes.setdefault(ref, []).append(event)
+                elif event.get("event_type") == "resolution":
+                    ref = event.get("decision_event_id")
+                    if isinstance(ref, str):
+                        resolutions.setdefault(ref, []).append(event)
     except OSError:
         return None
-    return _blocking_prior_from_state(decisions, outcomes, action_name, idempotency_key)
+    prior = _blocking_prior_from_state(
+        decisions, outcomes, action_name, idempotency_key, resolutions
+    )
+    if token is not None:
+        _precheck_store(token, "blocking", action_name, idempotency_key, prior)
+    return prior
 
 
 def _read_last_event_hash_scan(handle: io.BufferedRandom) -> str | None:
