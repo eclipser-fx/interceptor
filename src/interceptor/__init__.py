@@ -68,6 +68,7 @@ from .errors import (
     ContractError,
     CountersignError,
     DuplicateActionError,
+    EventShipError,
     EvidenceAuditError,
     EvidencePersistenceError,
     EvidencePrivacyInspectionError,
@@ -112,8 +113,9 @@ from .journal import (
     JournalStore,
     find_blocking_idempotent_decision,
     find_completed_idempotent_decision,
+    reset_precheck_cache,
 )
-from .observer import ActionObserver
+from .observer import ActionObserver, reset_notifications
 from .policy import (
     AllOf,
     AllowListProvider,
@@ -140,6 +142,14 @@ from .privacy import (
     PrivacyClassification,
     inspect_journal,
 )
+from .providers import StripeRefundFetcher
+from .reconcile import (
+    ProviderFetcher,
+    ReceiptReconciliation,
+    ReconcileReport,
+    reconcile_journal,
+    reconcile_verified_snapshot,
+)
 from .redaction import (
     DEFAULT_VALUE_PATTERNS,
     SENSITIVE_NAMES,
@@ -156,9 +166,16 @@ from .resolve import (
 from .schemas import as_openai_tool, describe_tool, mcp_tool
 from .shipping import CallableSink, EventSink, FanoutJournalStore, FileMirrorSink
 from .verification import VerificationIssue, VerificationResult, verify_journal
+from .witness import (
+    WitnessAuditReport,
+    WitnessFileStatus,
+    WitnessReport,
+    audit_witnesses,
+    witness_journal,
+)
 from .wrap_tool import wrap_tool, wrap_tools
 
-_FALLBACK_VERSION = "0.1.0"
+_FALLBACK_VERSION = "0.0.0+unknown"
 
 
 def _package_version() -> str:
@@ -219,6 +236,7 @@ __all__ = [
     "CountersignatureReport",
     "DuplicateActionError",
     "EphemeralSigningIdentity",
+    "EventShipError",
     "EventSink",
     "EvidenceAuditError",
     "EvidenceIncompleteError",
@@ -243,9 +261,12 @@ __all__ = [
     "PolicyError",
     "PredicateProvider",
     "PrivacyClassification",
+    "ProviderFetcher",
     "QuorumApprovalProvider",
     "RateLimitProvider",
     "ReceiptExtractor",
+    "ReceiptReconciliation",
+    "ReconcileReport",
     "RedactionError",
     "ResolutionError",
     "ResolutionReport",
@@ -256,6 +277,7 @@ __all__ = [
     "SigningIdentity",
     "SpendExtractor",
     "SpendingBudgetProvider",
+    "StripeRefundFetcher",
     "TerminalApprovalProvider",
     "TimeoutApprovalProvider",
     "ToolGateway",
@@ -264,10 +286,14 @@ __all__ = [
     "VerificationError",
     "VerificationIssue",
     "VerificationResult",
+    "WitnessAuditReport",
+    "WitnessFileStatus",
+    "WitnessReport",
     "__version__",
     "archive_journal",
     "as_openai_tool",
     "audit_journal",
+    "audit_witnesses",
     "build_sensitive_set",
     "canonical_hash",
     "canonicalize",
@@ -287,14 +313,19 @@ __all__ = [
     "load_private_key",
     "load_public_key",
     "mcp_tool",
+    "reconcile_journal",
+    "reconcile_verified_snapshot",
     "record_rotation_event",
     "render_html",
     "reset_idempotency_state",
+    "reset_notifications",
+    "reset_precheck_cache",
     "resolve_journal",
     "rotate_key",
     "value_matches_patterns",
     "verify_archive_chain",
     "verify_journal",
+    "witness_journal",
     "wrap_tool",
     "wrap_tools",
     "write_pack",
