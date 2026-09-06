@@ -19,7 +19,7 @@ import json
 import os
 from pathlib import Path
 
-from .identity import LocalSigningIdentity
+from .identity import LocalSigningIdentity, SigningIdentity
 from .journal import (
     EVENT_SCHEMA_VERSION,
     FileJournal,
@@ -43,7 +43,7 @@ class CheckpointReport:
 def checkpoint_journal(
     path: str | Path,
     *,
-    identity: LocalSigningIdentity | None = None,
+    identity: SigningIdentity | None = None,
     witness_path: str | Path | None = None,
 ) -> CheckpointReport:
     """Append a signed checkpoint event and write its durable witness.
