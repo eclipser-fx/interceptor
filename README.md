@@ -577,4 +577,8 @@ tracker — alongside the original fused name redaction, observer seam, tail-rea
 journal, and private-key permission check. See [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
 and [`docs/EVIDENCE_FORMAT.md`](docs/EVIDENCE_FORMAT.md).
 
+Stability and changes: [`docs/API_STABILITY.md`](docs/API_STABILITY.md) states
+what is stable and how deprecations ship; [`CHANGELOG.md`](CHANGELOG.md) records
+every notable change.
+
 MIT.
