@@ -31,6 +31,9 @@ pre-1.0 additive-only discipline until then).
 - `docs/API_STABILITY.md` (SemVer + deprecation policy), `docs/DEPLOYMENT.md`
   (witness cron, rotation, reconciliation recipes), `docs/PERFORMANCE.md`
   (measured envelope), `docs/REVIEW_GUIDE.md` (external review playbook).
+- `WitnessFreshnessProvider`: deny unless `witness_dir/latest.checkpoint` is
+  fresh (`max_age_seconds`), with optional `risks=` subset enforcement —
+  turns tail-truncation defense into an approval gate.
 
 ### Fixed (engineering-review batch)
 - `approval="never"` with an `approval_provider` is now a decoration-time
