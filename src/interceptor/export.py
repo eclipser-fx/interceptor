@@ -106,27 +106,45 @@ def journal_stats(snapshot: JournalSnapshot) -> dict[str, Any]:
 
 
 def render_html(bundle: dict[str, Any]) -> str:
-    """A single self-contained HTML report for an evidence pack."""
-    verification = bundle["verification"]
-    audit = bundle["audit"]
-    rows: list[str] = []
-    if audit is not None:
-        for inv in audit["invocations"]:
-            rows.append(
-                "<tr><td>{action}</td><td>{status}</td><td>{decision}</td>"
-                "<td>{when}</td></tr>".format(
-                    action=html.escape(str(inv["action_name"])),
-                    status=html.escape(str(inv["status"])),
-                    decision=html.escape(str(inv["decision"])),
-                    when=html.escape(str(inv["decision_timestamp_utc"])),
-                )
-            )
-    issues = "".join(
-        f"<li>[{html.escape(str(i['code']))}] {html.escape(str(i['message']))}</li>"
-        for i in verification["issues"]
-    ) + "".join(
-        f"<li>[{html.escape(str(i['code']))}] {html.escape(str(i['message']))}</li>"
-        for i in (audit["issues"] if audit is not None else [])
+    """A single self-contained HTML report for an evidence pack.
+
+    Raises :class:`EvidenceAuditError` on a malformed bundle instead of
+    leaking a bare ``KeyError`` to auditor tooling.
+    """
+    try:
+        verification = bundle["verification"]
+        audit = bundle["audit"]
+        journal = bundle["journal"]
+        exported_at = bundle["exported_at"]
+        issues = [(str(i["code"]), str(i["message"])) for i in verification["issues"]]
+        if audit is not None:
+            issues += [(str(i["code"]), str(i["message"])) for i in audit["issues"]]
+            rows = [
+                {
+                    "action": str(inv["action_name"]),
+                    "status": str(inv["status"]),
+                    "decision": str(inv["decision"]),
+                    "when": str(inv["decision_timestamp_utc"]),
+                }
+                for inv in audit["invocations"]
+            ]
+        else:
+            rows = []
+        valid = bool(verification["valid"])
+        events_verified = int(verification["events_verified"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EvidenceAuditError(f"evidence pack is malformed: {exc}") from exc
+    table_rows = "".join(
+        "<tr><td>{action}</td><td>{status}</td><td>{decision}</td><td>{when}</td></tr>".format(
+            action=html.escape(row["action"]),
+            status=html.escape(row["status"]),
+            decision=html.escape(row["decision"]),
+            when=html.escape(row["when"]),
+        )
+        for row in rows
+    )
+    issue_items = "".join(
+        f"<li>[{html.escape(code)}] {html.escape(message)}</li>" for code, message in issues
     )
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -137,17 +155,17 @@ td,th{{border:1px solid #ccc;padding:.4rem;text-align:left}}
 .ok{{color:#0a0}}.bad{{color:#a00}}</style></head>
 <body>
 <h1>Evidence pack</h1>
-<p>Journal: {html.escape(str(bundle["journal"]))}<br>
-Exported: {html.escape(str(bundle["exported_at"]))}</p>
+<p>Journal: {html.escape(str(journal))}<br>
+Exported: {html.escape(str(exported_at))}</p>
 <h2>Verification</h2>
-<p class="{"ok" if verification["valid"] else "bad"}">
-{"VALID" if verification["valid"] else "INVALID"} —
-{int(verification["events_verified"])} events verified.</p>
+<p class="{"ok" if valid else "bad"}">
+{"VALID" if valid else "INVALID"} —
+{events_verified} events verified.</p>
 <h2>Invocations</h2>
 <table><tr><th>Action</th><th>Status</th><th>Decision</th><th>When</th></tr>
-{"".join(rows) if rows else "<tr><td colspan='4'>(none)</td></tr>"}</table>
+{table_rows if table_rows else "<tr><td colspan='4'>(none)</td></tr>"}</table>
 <h2>Issues</h2>
-<ul>{issues if issues else "<li>(none)</li>"}</ul>
+<ul>{issue_items if issue_items else "<li>(none)</li>"}</ul>
 </body>
 </html>
 """
