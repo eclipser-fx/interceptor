@@ -115,11 +115,18 @@ def guard(
     An ``async def`` target is wrapped in an async wrapper that awaits the
     original call, so the guarded callable stays a coroutine function.
 
+    Callable objects are classified by their ``__call__`` signature: a sync
+    ``__call__`` returning an awaitable takes the sync path (the coroutine is
+    recorded as the result, never awaited). Declare such tools as ``async
+    def`` functions or ``functools.partial`` of one instead.
+
     Args:
         action: Stable logical action name. Defaults to a deterministic
             identity derived from the module and qualified function name.
         risk: ``low`` | ``medium`` | ``high`` | ``critical``.
-        approval: ``required`` (default; fail-safe) or ``never``.
+        approval: ``required`` (default; fail-safe) or ``never``. With
+            ``never`` no provider is consulted, so passing ``approval_provider``
+            alongside it is a ``ContractError`` rather than a silent no-op.
         journal: Journal path override, or a ``JournalStore`` implementation.
         redact: Additional parameter and field names to redact
             (case-insensitive), on top of the built-in set.
@@ -156,6 +163,11 @@ def guard(
     """
 
     def decorate(target: F) -> F:
+        if approval == "never" and approval_provider is not None:
+            raise ContractError(
+                "approval='never' ignores any approval_provider; remove the provider or "
+                "use approval='required' so budgets, quorum, and attribution actually enforce"
+            )
         if _is_generator_callable(target):
             raise UnsupportedFunctionError(
                 f"@guard does not support generator functions; "
