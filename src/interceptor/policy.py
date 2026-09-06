@@ -919,6 +919,11 @@ class WitnessFreshnessProvider:
             )
         witness = self._witness_dir / self._witness_filename
         try:
+            if witness.is_dir():
+                return ApprovalDecision(
+                    DECISION_DENIED,
+                    f"witness at {witness} is a directory; failing closed",
+                )
             mtime = witness.stat().st_mtime
         except FileNotFoundError:
             return ApprovalDecision(
