@@ -11,6 +11,13 @@ countersignature event (signed by the counter key, hash-chained like every
 other event) committing to the newest checkpoint's ``(count, head)``. Forging
 history afterwards requires both keys.
 
+The checkpoint is looked up from the live journal without verification and
+without holding the append lock: countersign while writers are quiesced, and
+only countersign checkpoints you have verified (a second party signing blindly
+attests to nothing). If a checkpoint lands mid-operation the attestation is
+still truthful but no longer newest — the report flags ``superseded`` so you
+can re-run.
+
 The counter key must not live in the evidence home it attests to; verification
 checks the countersignature against the same trusted keyring, so pass the
 counter public key with ``--public-key`` (or register it in ``trusted_keys/``).
@@ -37,6 +44,7 @@ class CountersignatureReport:
     checkpoint_event_id: str
     checkpoint_count: int
     head_sha256: Any
+    superseded: bool = False
 
 
 def countersign_journal(
@@ -78,12 +86,18 @@ def countersign_journal(
         return finalize_event(payload, signer.sign)
 
     event = FileJournal(journal).append_event(build)
+    # A checkpoint that landed between the lookup and the append is still a
+    # truthful attestation, but it is no longer the newest — say so instead of
+    # letting the operator believe otherwise.
+    latest = _newest_checkpoint(journal)
+    superseded = latest is None or str(latest.get("event_id")) != checkpoint_event_id
     return CountersignatureReport(
         journal_path=journal,
         countersignature_event=event,
         checkpoint_event_id=checkpoint_event_id,
         checkpoint_count=int(checkpoint_count),
         head_sha256=head_sha256,
+        superseded=superseded,
     )
 
 
