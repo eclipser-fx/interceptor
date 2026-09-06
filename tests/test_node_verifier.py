@@ -121,6 +121,40 @@ def test_node_rejects_truncation(evidence_home):
 
 
 @needs_node
+def test_node_rejects_dot_segment_archive_path(evidence_home, tmp_path):
+    @guard(action="test.node-dotpath", approval_provider=allow())
+    def act() -> str:
+        return "ok"
+
+    act()
+    journal = evidence_home / "journal.jsonl"
+    lines = journal.read_text().splitlines()
+    tip_hash = json.loads(lines[-1])["event_hash"]
+    lines.append(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "event_type": "archive",
+                "event_id": "00000000-0000-4000-8000-000000000099",
+                "timestamp_utc": "2026-01-01T00:00:00.000000Z",
+                "key_id": "ed25519:0000000000000000",
+                "previous_event_hash": tip_hash,
+                "event_hash": "0" * 64,
+                "signature": "e30=",
+                "prior_count": 2,
+                "prior_head": "0" * 64,
+                "archived_path": "..",
+            }
+        )
+    )
+    journal.write_text("\n".join(lines) + "\n")
+
+    code, out = run_verifier(journal, evidence_home / "verify_key.pem")
+    assert code == 1
+    assert "archive_bad_path" in out
+
+
+@needs_node
 def test_node_verifies_archive_link(evidence_home):
     @guard(action="test.node-archive", approval_provider=allow())
     def act() -> str:
