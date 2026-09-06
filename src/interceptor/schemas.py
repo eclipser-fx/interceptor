@@ -4,14 +4,25 @@ Agent frameworks (OpenAI function calling, MCP, LangChain) all need the same
 thing: a name, a description, and a JSON Schema for the parameters. These
 helpers derive it from :func:`inspect.signature` — on a plain or an already
 guarded function (``functools.wraps`` preserves ``__wrapped__``, which
-signature-following resolves) — so the schema can never disagree with the
-contract the evidence commits to.
+signature-following resolves) — so the schema tracks the contract the
+evidence commits to. Where JSON Schema cannot express a Python construct
+exactly (see below), the schema says so explicitly instead of silently lying:
+
+* ``*args`` maps to ``{"type": "array"}`` and ``**kwargs`` to
+  ``{"type": "object"}`` — variadics are accepted by call binding, so they are
+  described, never dropped;
+* ``X | None`` / ``Optional[X]`` maps to ``{"anyOf": [<X>, {"type": "null"}]}``
+  so explicit ``null`` validates;
+* dataclass fields without defaults are listed in ``required``;
+* anything else unresolvable maps to ``{}`` (unconstrained), never to a
+  narrower type than the annotation allows.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import inspect
+import types
 from collections.abc import Callable
 from typing import Any, Union, get_args, get_origin
 
@@ -42,17 +53,29 @@ def _schema_for_name(name: str) -> dict[str, Any]:
     if text in _NAME_TYPES:
         return {"type": _NAME_TYPES[text]}
     if text.startswith("Optional[") and text.endswith("]"):
-        return _schema_for_name(text[len("Optional[") : -1])
+        return _with_null(_schema_for_name(text[len("Optional[") : -1]))
     if "|" in text:  # "X | None"
-        for part in text.split("|"):
-            schema = _schema_for_name(part)
-            if schema and schema != {"type": "null"}:
-                return schema
-        return {}
+        parts = [_schema_for_name(part) for part in text.split("|")]
+        non_null = [schema for schema in parts if schema and schema != {"type": "null"}]
+        nullable = len(non_null) != len([p for p in parts if p])
+        if not non_null:
+            return {"type": "null"} if nullable else {}
+        if len(non_null) == 1:
+            return _with_null(non_null[0]) if nullable else non_null[0]
+        return {"anyOf": [*non_null, {"type": "null"}]} if nullable else {"anyOf": non_null}
     for prefix, kind in (("list[", "array"), ("tuple[", "array"), ("dict[", "object")):
         if text.startswith(prefix):
             return {"type": kind}
     return {}
+
+
+def _with_null(schema: dict[str, Any]) -> dict[str, Any]:
+    """Add explicit nullability, preserving unconstrained as unconstrained."""
+    if not schema:
+        return {}
+    if schema == {"type": "null"}:
+        return schema
+    return {"anyOf": [schema, {"type": "null"}]}
 
 
 def _schema_for(annotation: Any) -> dict[str, Any]:
@@ -66,31 +89,51 @@ def _schema_for(annotation: Any) -> dict[str, Any]:
     if annotation is None or annotation is type(None):
         return {"type": "null"}
     origin = get_origin(annotation)
-    if origin is Union:
-        options = [_schema_for(arg) for arg in get_args(annotation) if arg is not type(None)]
+    if origin is Union or origin is types.UnionType:
+        args = get_args(annotation)
+        nullable = type(None) in args
+        options = [_schema_for(arg) for arg in args if arg is not type(None)]
         options = [opt for opt in options if opt]
+        if not options:
+            return {"type": "null"} if nullable else {}
         if len(options) == 1:
-            return options[0]
-        if options:
-            return {"anyOf": options}
-        return {}
+            return _with_null(options[0]) if nullable else options[0]
+        return {"anyOf": [*options, {"type": "null"}]} if nullable else {"anyOf": options}
     if origin in (list, tuple, set, frozenset):
         args = get_args(annotation)
         return {"type": "array", "items": _schema_for(args[0]) if args else {}}
     if origin is dict:
         return {"type": "object"}
     if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+        try:
+            import typing as _typing
+
+            field_hints = _typing.get_type_hints(annotation)
+        except Exception:
+            field_hints = {}
         properties = {}
+        required = []
         for field in dataclasses.fields(annotation):
-            properties[field.name] = _schema_for(field.type)
-        return {"type": "object", "properties": properties}
+            properties[field.name] = _schema_for(field_hints.get(field.name, field.type))
+            if (
+                field.default is dataclasses.MISSING
+                and field.default_factory is dataclasses.MISSING
+            ):
+                required.append(field.name)
+        schema: dict[str, Any] = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
+        return schema
     return {}
 
 
 def describe_tool(func: Callable[..., Any]) -> dict[str, Any]:
     """``{"name", "description", "parameters"}`` for *func*.
 
-    Raises :class:`ValueError` when the signature cannot be inspected.
+    String annotations are resolved with :func:`typing.get_type_hints` where
+    possible (so nested dataclasses and real unions describe faithfully);
+    unresolvable names fall back to their string form. Raises
+    :class:`ValueError` when the signature cannot be inspected.
     """
     name = getattr(func, "__name__", None) or "tool"
     description = (inspect.getdoc(func) or "").splitlines()[0] if inspect.getdoc(func) else ""
@@ -98,12 +141,23 @@ def describe_tool(func: Callable[..., Any]) -> dict[str, Any]:
         signature = inspect.signature(func)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"cannot describe tool {name!r}: {exc}") from exc
+    try:
+        import typing as _typing
+
+        hints = _typing.get_type_hints(func)
+    except Exception:
+        hints = {}
     properties: dict[str, Any] = {}
     required: list[str] = []
     for param in signature.parameters.values():
-        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+        annotation = hints.get(param.name, param.annotation)
+        if param.kind is param.VAR_POSITIONAL:
+            properties[param.name] = {"type": "array"}
             continue
-        properties[param.name] = _schema_for(param.annotation)
+        if param.kind is param.VAR_KEYWORD:
+            properties[param.name] = {"type": "object"}
+            continue
+        properties[param.name] = _schema_for(annotation)
         if param.default is param.empty:
             required.append(param.name)
     return {
