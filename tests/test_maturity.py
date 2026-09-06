@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -705,9 +706,16 @@ def test_approval_server_allow_deny(allow_socket_creation):
                 raise AssertionError("expected 403")
             except urllib.error.HTTPError as exc:
                 assert exc.code == 403
-            # Approve from the "phone".
+            # Approve from the "phone", using the per-request token from the page.
+            req_token = re.search(r"name='req_token' value='([^']+)'", page).group(1)
             data = urllib.parse.urlencode(
-                {"token": token, "id": "req-1", "decision": "allow", "by": "ops"}
+                {
+                    "token": token,
+                    "id": "req-1",
+                    "decision": "allow",
+                    "by": "ops",
+                    "req_token": req_token,
+                }
             ).encode()
             base = server.url.split("?")[0]
             post = urllib.request.Request(base + "decide", data=data)
@@ -716,6 +724,72 @@ def test_approval_server_allow_deny(allow_socket_creation):
             thread.join(timeout=10)
             assert holder["decision"].allowed
             assert holder["decision"].approved_by == "ops"
+        finally:
+            thread.join(timeout=10)
+
+
+def test_approval_server_rejects_forged_decision_token(allow_socket_creation):
+    import time as _time
+    import urllib.error as _error
+    import urllib.parse as _parse
+    import urllib.request as _request
+
+    from interceptor.approve_server import ApprovalServer, ServerApprovalProvider
+
+    with ApprovalServer() as server:
+        provider = ServerApprovalProvider(server, timeout_seconds=10)
+        req = ic.ApprovalRequest(
+            action_name="deploy.prod",
+            risk="critical",
+            approval_mode="required",
+            redacted_input_summary="",
+            input_hash="h",
+            contract_hash="c",
+        )
+        holder: dict = {}
+        thread = threading.Thread(target=lambda: holder.setdefault("d", provider.decide(req)))
+        thread.start()
+        try:
+            token = server.url.split("token=")[1]
+            base = server.url.split("?")[0]
+            end = _time.monotonic() + 10
+            posted = False
+            while _time.monotonic() < end:
+                pending = server._snapshot()
+                if pending:
+                    pending_id, entry = pending[0]
+                    bad = _parse.urlencode(
+                        {
+                            "token": token,
+                            "id": pending_id,
+                            "decision": "allow",
+                            "req_token": "forged",
+                        }
+                    ).encode()
+                    try:
+                        _request.urlopen(base + "decide", data=bad)
+                        raise AssertionError("expected 410")
+                    except _error.HTTPError as exc:
+                        assert exc.code == 410
+                    posted = True
+                    break
+                _time.sleep(0.05)
+            assert posted
+            # The forged POST decided nothing; the request is still pending.
+            assert server._snapshot(), "forged decision must not consume the request"
+            # Approve properly so the waiter exits promptly.
+            good = _parse.urlencode(
+                {
+                    "token": token,
+                    "id": pending_id,
+                    "decision": "allow",
+                    "req_token": entry.decision_token,
+                }
+            ).encode()
+            with _request.urlopen(base + "decide", data=good):
+                pass
+            thread.join(timeout=10)
+            assert holder["d"].allowed
         finally:
             thread.join(timeout=10)
 
@@ -767,10 +841,15 @@ def test_server_provider_end_to_end(evidence_home, allow_socket_creation):
             while _time.monotonic() < deadline:
                 pending = server._snapshot()
                 if pending:
-                    pending_id, _ = pending[0]
+                    pending_id, entry = pending[0]
                     token = server.url.split("token=")[1]
                     data = _parse.urlencode(
-                        {"token": token, "id": pending_id, "decision": "allow"}
+                        {
+                            "token": token,
+                            "id": pending_id,
+                            "decision": "allow",
+                            "req_token": entry.decision_token,
+                        }
                     ).encode()
                     with _request.urlopen(server.url.split("?")[0] + "decide", data=data):
                         pass
