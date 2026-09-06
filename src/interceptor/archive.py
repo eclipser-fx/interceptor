@@ -6,10 +6,11 @@ timestamped sibling and starts a fresh file whose first event is an ``archive``
 record committing to the predecessor's ``(count, head)`` — so a later reader
 can follow the link backwards across rotations.
 
-Run archives while writers are quiesced. In-process writers are held off by
-the journal lock for the whole operation; a concurrent *cross-process* writer
-that slips between the rename and the first append of the new file aborts the
-operation with :class:`ArchiveError` instead of producing a broken chain.
+Run archives while writers are quiesced. The destination is claimed
+exclusively (no concurrent archiver can take it), and a *cross-process* writer
+that slips between the stats read and the rename — or the rename and the first
+append — aborts the operation with :class:`ArchiveError` (rolling the rename
+back when needed) instead of producing a broken chain.
 """
 
 from __future__ import annotations
@@ -116,7 +117,12 @@ def verify_archive_chain(
         archived_name = first_event.get("archived_path")
         prior_count = first_event.get("prior_count")
         prior_head = first_event.get("prior_head")
-        if not isinstance(archived_name, str) or "/" in archived_name or "\\" in archived_name:
+        if (
+            not isinstance(archived_name, str)
+            or "/" in archived_name
+            or "\\" in archived_name
+            or archived_name in (".", "..")
+        ):
             issues.append(
                 ArchiveChainIssue(
                     str(current), "archive_bad_link", "archived_path must be a bare file name"
@@ -205,6 +211,8 @@ def archive_journal(
     newest *keep* archives are retained (oldest deleted, best-effort).
     """
     journal = Path(path)
+    if keep is not None and keep < 1:
+        raise ArchiveError(f"keep must be positive, got {keep}")
     store = FileJournal(journal)
     try:
         count, head = store.archive_stats()
@@ -213,11 +221,27 @@ def archive_journal(
     if count == 0:
         raise ArchiveError(f"nothing to archive in {journal}")
 
-    archived = _unique_archive_path(journal)
+    archived = _claim_archive_path(journal)
     try:
         os.replace(journal, archived)
     except OSError as exc:
         raise ArchiveError(f"cannot archive {journal}: {exc}") from exc
+    # A writer that slipped between the stats read and the rename would leave
+    # the archived file longer than committed. Detect it and roll back rather
+    # than writing a custody link that `verify-chain` would (correctly) reject.
+    try:
+        settled_count, settled_head = FileJournal(archived).archive_stats()
+    except JournalError as exc:
+        _rollback_archive(archived, journal)
+        raise ArchiveError(f"cannot archive {journal}: {exc}") from exc
+    if (settled_count, settled_head) != (count, head):
+        if _rollback_archive(archived, journal):
+            raise ArchiveError(f"concurrent write to {journal} during archive; rerun the archive")
+        raise ArchiveError(
+            f"concurrent write to {journal} during archive, and a new file now "
+            f"exists at the live path; old evidence is intact at {archived} — "
+            "reconcile manually instead of rerunning blindly"
+        )
 
     signer = identity or LocalSigningIdentity.load_or_create()
     archived_name = archived.name
@@ -251,8 +275,6 @@ def archive_journal(
 
     pruned: tuple[Path, ...] = ()
     if keep is not None:
-        if keep < 1:
-            raise ArchiveError(f"keep must be positive, got {keep}")
         pruned = _prune_archives(journal, keep)
     return ArchiveReport(
         journal_path=journal,
@@ -268,14 +290,44 @@ def _archive_glob_root(path: Path) -> tuple[Path, str]:
     return path.parent, f"{path.stem}-*.jsonl"
 
 
-def _unique_archive_path(path: Path) -> Path:
+def _claim_archive_path(path: Path) -> Path:
+    """Reserve a destination name no concurrent archiver can take.
+
+    The timestamped candidate is claimed with ``O_CREAT|O_EXCL`` before the
+    rename, so two archivers in the same second diverge to different suffixes
+    instead of the second ``os.replace`` destroying the first archive.
+    """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    candidate = path.with_name(f"{path.stem}-{stamp}.jsonl")
-    index = 1
-    while candidate.exists():
-        index += 1
-        candidate = path.with_name(f"{path.stem}-{stamp}-{index}.jsonl")
-    return candidate
+    index = 0
+    while True:
+        name = f"{path.stem}-{stamp}.jsonl" if index == 0 else f"{path.stem}-{stamp}-{index}.jsonl"
+        candidate = path.with_name(name)
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            index += 1
+            continue
+        except OSError as exc:
+            raise ArchiveError(f"cannot reserve archive path {candidate}: {exc}") from exc
+        os.close(fd)
+        return candidate
+
+
+def _rollback_archive(archived: Path, journal: Path) -> bool:
+    """Move a renamed journal back after an aborted archive.
+
+    Refuses when a successor file already exists at the live path — rolling
+    back over it would delete valid foreign events. In that case the operator
+    must reconcile manually: the old evidence is intact at *archived*.
+    Returns True when the rollback happened.
+    """
+    if journal.exists():
+        return False
+    try:
+        os.replace(archived, journal)
+    except OSError:
+        return False
+    return True
 
 
 def _prune_archives(path: Path, keep: int) -> tuple[Path, ...]:
