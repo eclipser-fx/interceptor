@@ -26,6 +26,12 @@ classifiers = [
     "Topic :: Security",
 ]
 
+[project.urls]
+Homepage = "https://github.com/wiramahendra/guardrail-evidence"
+Changelog = "https://github.com/wiramahendra/guardrail-evidence/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/wiramahendra/guardrail-evidence"
+"Threat Model" = "https://github.com/wiramahendra/guardrail-evidence/blob/main/docs/THREAT_MODEL.md"
+
 [project.scripts]
 interceptor = "interceptor.cli:main"
 
@@ -42,7 +48,7 @@ dev = [
 packages = ["src/interceptor"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/interceptor", "docs", "README.md", "LICENSE", "SECURITY.md"]
+include = ["src/interceptor", "docs", "README.md", "LICENSE", "SECURITY.md", "CHANGELOG.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
