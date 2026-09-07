@@ -57,6 +57,10 @@ pre-1.0 additive-only discipline until then).
   scan path. Proven step-by-step equivalent to scans, plus thread (8×) and
   multiprocess (4× spawn) same-key races with exactly one execution and a
   2,000-call soak (verify + streaming audit clean).
+- Bounded in-process idempotency memory (`engine.py`): file-backed completions
+  are FIFO-capped (eviction is safe — the journal stays authoritative, at most
+  one rescan); custom-store completions stay uncapped since the process set is
+  their only dedup.
 
 ### Fixed (engineering-review batch)
 - `approval="never"` with an `approval_provider` is now a decoration-time
