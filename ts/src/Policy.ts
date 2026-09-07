@@ -464,6 +464,102 @@ export const loadPolicyFile = (filePath: string): RuleProvider => {
 };
 
 /**
+ * Deny unless the off-host witness is fresh.
+ *
+ * Tail truncation is undetectable from the journal alone; only a witness
+ * that left the machine bounds it. This provider turns that operational
+ * requirement into an approval gate: it stats `witnessPath` (written by
+ * `checkpointJournal`) and denies when the witness is missing or older than
+ * `maxAgeSeconds`. `risks` optionally restricts enforcement to a subset
+ * (e.g. `["high", "critical"]`); other risks allow with a reason stating the
+ * gate did not apply. The default clock is wall-clock seconds (to compare
+ * against filesystem mtime — not monotonic); inject a stub in tests. All
+ * filesystem and clock failures fail closed. Stateless and thread-safe.
+ */
+export class WitnessFreshnessProvider {
+  private readonly risks: ReadonlySet<string> | undefined;
+  private readonly clock: () => number;
+
+  constructor(
+    private readonly witnessPath: string,
+    private readonly maxAgeSeconds: number,
+    options?: {
+      readonly risks?: ReadonlySet<string> | ReadonlyArray<string>;
+      readonly clock?: () => number;
+    },
+  ) {
+    if (!(maxAgeSeconds > 0)) {
+      throw new Error("maxAgeSeconds must be positive");
+    }
+    const file = witnessPath.split("/").pop() ?? "";
+    if (file === "" || file.includes("\\")) {
+      throw new Error("witnessPath must name a plain file");
+    }
+    if (options?.risks !== undefined) {
+      const unknown = [...options.risks].filter((risk) => !KNOWN_RISKS.has(risk));
+      if (unknown.length > 0) {
+        throw new Error(`unknown risks ${unknown.join(",")}; expected low/medium/high/critical`);
+      }
+      this.risks = new Set(options.risks);
+    }
+    this.clock = options?.clock ?? (() => Date.now() / 1000);
+  }
+
+  decide(request: ApprovalRequest): Effect.Effect<ApprovalDecision, never> {
+    if (this.risks !== undefined && !this.risks.has(request.risk)) {
+      return Effect.succeed({
+        decision: "allowed",
+        reason: `witness freshness not required for risk '${request.risk}'`,
+      } as const);
+    }
+    let mtimeSeconds: number;
+    try {
+      const stat = fs.statSync(this.witnessPath);
+      if (stat.isDirectory()) {
+        return Effect.succeed({
+          decision: "denied",
+          reason: `witness at ${this.witnessPath} is a directory; failing closed`,
+        } as const);
+      }
+      mtimeSeconds = stat.mtimeMs / 1000;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException)?.code === "ENOENT") {
+        return Effect.succeed({
+          decision: "denied",
+          reason: `no witness at ${this.witnessPath} (run checkpoint); failing closed`,
+        } as const);
+      }
+      return Effect.succeed({
+        decision: "denied",
+        reason: `witness unavailable (${cause}); failing closed`,
+      } as const);
+    }
+    let now: number;
+    try {
+      now = this.clock();
+    } catch (cause) {
+      return Effect.succeed({
+        decision: "denied",
+        reason: `witness clock failed (${cause}); failing closed`,
+      } as const);
+    }
+    const age = Math.max(0, now - mtimeSeconds);
+    if (age > this.maxAgeSeconds) {
+      return Effect.succeed({
+        decision: "denied",
+        reason:
+          `witness stale (${Math.round(age)}s old, max ${this.maxAgeSeconds}s); ` +
+          "run checkpoint; failing closed",
+      } as const);
+    }
+    return Effect.succeed({
+      decision: "allowed",
+      reason: `witness fresh (${Math.round(age)}s old, max ${this.maxAgeSeconds}s)`,
+    } as const);
+  }
+}
+
+/**
  * Stamp inner allowances with an operator identity (explicit or from
  * `INTERCEPTOR_APPROVER`, e.g. an OIDC `sub` the launcher exports). Denials
  * pass through; missing or malformed identity fails closed.
