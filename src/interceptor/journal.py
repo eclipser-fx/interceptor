@@ -43,6 +43,7 @@ error rather than silently accepting it.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import json
@@ -135,6 +136,155 @@ def reset_precheck_cache() -> None:
         _PRECHECK_CACHE.clear()
 
 
+#: Whether the in-process idempotency index may be used. It is exact only
+#: where appends are serialized by an OS file lock (``fcntl`` on POSIX,
+#: ``msvcrt`` on Windows — the same platforms the journal locks on). Anywhere
+#: else the authoritative check keeps its full scan, exactly as before.
+_USE_IDEM_INDEX = os.name in ("posix", "nt")
+
+_IDEM_INDEX_MAX_PATHS = 128
+
+
+@dataclasses.dataclass
+class _IdemTables:
+    """The idempotency-relevant slice of a journal prefix, in file order.
+
+    Only ``allowed``, non-``dry_run`` decisions carrying an idempotency key
+    are stored (denied, dry-run, and keyless decisions can never block, so
+    omitting them changes nothing the blocking query can return), plus the
+    outcomes and resolutions linked to those decisions. ``by_key`` lists each
+    key's decisions in file order across incremental updates and rebuilds,
+    so earliest-wins rules replay exactly as a full scan would.
+    """
+
+    decisions: dict[str, dict[str, Any]] = dataclasses.field(default_factory=dict)
+    by_key: dict[tuple[str, str], list[str]] = dataclasses.field(default_factory=dict)
+    outcomes: dict[str, list[dict[str, Any]]] = dataclasses.field(default_factory=dict)
+    resolutions: dict[str, list[dict[str, Any]]] = dataclasses.field(default_factory=dict)
+
+
+#: Resolved journal path -> (journal size in bytes, tail event hash, tables).
+#: An entry is trusted only while both the size and the hash-chained head
+#: match: the head covers the entire prefix, so a match proves the cached
+#: tables describe exactly this journal content (a mismatch falls back to a
+#: full scan and rebuild). Foreign writers, rotation, restores, and sibling
+#: implementations can only cause a fallback, never a wrong answer.
+_IDEM_TABLES_CACHE: dict[str, tuple[int, str | None, _IdemTables]] = {}
+_IDEM_TABLES_GUARD = threading.Lock()
+
+
+def _idem_cache_key(path: Path) -> str:
+    """Stable cache key for *path*, mirroring the process-lock key."""
+    try:
+        return str(Path(path).resolve())
+    except Exception:
+        return str(Path.cwd() / path) if not path.is_absolute() else str(path)
+
+
+def reset_idem_index() -> None:
+    """Forget cached idempotency tables. For tests only."""
+    with _IDEM_TABLES_GUARD:
+        _IDEM_TABLES_CACHE.clear()
+
+
+def _evolve_idem_tables(tables: _IdemTables, event: Any) -> None:
+    """Fold one appended *event* into *tables* (same rules as a rescan).
+
+    Events that cannot affect a blocking query — non-decision/outcome/
+    resolution types, denied or dry-run decisions, keyless decisions, and
+    outcomes/resolutions for untracked decisions — leave the tables
+    untouched. Malformed shapes are ignored rather than stored: the next
+    read still validates against the journal itself.
+    """
+    if not isinstance(event, dict):
+        return
+    event_type = event.get("event_type")
+    if event_type == "decision":
+        if event.get("decision") != "allowed" or event.get("dry_run") is True:
+            return
+        if "idempotency_key" not in event or not isinstance(event.get("action_name"), str):
+            return
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or event_id in tables.decisions:
+            return
+        tables.decisions[event_id] = event
+        key = event.get("idempotency_key")
+        action = event.get("action_name")
+        if isinstance(key, str) and isinstance(action, str):
+            # Secondary index so queries touch only same-key decisions, not
+            # every tracked key. Non-string keys can never match a query
+            # (the engine only issues non-empty strings) and stay out.
+            tables.by_key.setdefault((action, key), []).append(event_id)
+    elif event_type == "outcome":
+        ref = event.get("decision_event_id")
+        status = event.get("status")
+        if isinstance(ref, str) and isinstance(status, str) and ref in tables.decisions:
+            tables.outcomes.setdefault(ref, []).append({"status": status})
+    elif event_type == "resolution":
+        ref = event.get("decision_event_id")
+        resolution = event.get("resolution")
+        if isinstance(ref, str) and isinstance(resolution, str) and ref in tables.decisions:
+            tables.resolutions.setdefault(ref, []).append({"resolution": resolution})
+
+
+def _collect_idem_tables(handle: io.BufferedRandom) -> _IdemTables:
+    """Rebuild tables from a full scan of the already-locked *handle*.
+
+    Skips corrupt lines exactly like the idempotency scans do (chain
+    integrity is verified separately), and applies the same first-wins and
+    ordering rules as :func:`_evolve_idem_tables` so incremental updates and
+    rebuilds always agree.
+    """
+    tables = _IdemTables()
+    handle.seek(0)
+    for raw in handle:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        _evolve_idem_tables(tables, event)
+    return tables
+
+
+def _cache_idem_tables(key: str, size: int, head: str | None, tables: _IdemTables) -> None:
+    """Publish *tables* for *key*; evicts the oldest path past the cap."""
+    with _IDEM_TABLES_GUARD:
+        _IDEM_TABLES_CACHE[key] = (size, head, tables)
+        while len(_IDEM_TABLES_CACHE) > _IDEM_INDEX_MAX_PATHS:
+            _IDEM_TABLES_CACHE.pop(next(iter(_IDEM_TABLES_CACHE)))
+
+
+def _cached_idem_tables(key: str, size: int, head: str | None) -> _IdemTables | None:
+    """Tables for *key* iff they describe exactly ``(size, head)``."""
+    with _IDEM_TABLES_GUARD:
+        entry = _IDEM_TABLES_CACHE.get(key)
+    if entry is None or (entry[0], entry[1]) != (size, head):
+        return None
+    return entry[2]
+
+
+def _drop_idem_tables(key: str) -> None:
+    with _IDEM_TABLES_GUARD:
+        _IDEM_TABLES_CACHE.pop(key, None)
+
+
+def _locked_handle_state(handle: io.BufferedRandom) -> tuple[int, str | None]:
+    """(size in bytes, tail event hash) of the locked *handle*.
+
+    Leaves the file position unspecified; every caller seeks explicitly.
+    """
+    handle.seek(0, io.SEEK_END)
+    size = handle.tell()
+    if size == 0:
+        return 0, GENESIS_PREVIOUS_HASH
+    return size, _read_last_event_hash(handle)
+
+
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
@@ -214,10 +364,22 @@ class FileJournal:
                         line = json.dumps(
                             event, sort_keys=True, separators=(",", ":"), ensure_ascii=False
                         )
+                        encoded = line.encode("utf-8") + b"\n"
                         handle.seek(0, io.SEEK_END)
-                        handle.write(line.encode("utf-8") + b"\n")
+                        size_before = handle.tell()
+                        handle.write(encoded)
                         handle.flush()
                         os.fsync(handle.fileno())
+                        _note_idem_append(
+                            self._path,
+                            event,
+                            size_before,
+                            previous_hash,
+                            size_before + len(encoded),
+                            event.get("event_hash")
+                            if isinstance(event.get("event_hash"), str)
+                            else None,
+                        )
                     finally:
                         _unlock_file(handle)
             except JournalError:
@@ -247,10 +409,22 @@ class FileJournal:
                         line = json.dumps(
                             event, sort_keys=True, separators=(",", ":"), ensure_ascii=False
                         )
+                        encoded = line.encode("utf-8") + b"\n"
                         handle.seek(0, io.SEEK_END)
-                        handle.write(line.encode("utf-8") + b"\n")
+                        size_before = handle.tell()
+                        handle.write(encoded)
                         handle.flush()
                         os.fsync(handle.fileno())
+                        _note_idem_append(
+                            self._path,
+                            event,
+                            size_before,
+                            previous_hash,
+                            size_before + len(encoded),
+                            event.get("event_hash")
+                            if isinstance(event.get("event_hash"), str)
+                            else None,
+                        )
                     finally:
                         _unlock_file(handle)
             except JournalError:
@@ -301,18 +475,33 @@ class FileJournal:
                     try:
                         blocking: str | None = None
                         if action_name is not None and idempotency_key is not None:
-                            blocking = _scan_blocking_idempotent(
-                                handle, action_name, idempotency_key
+                            blocking = _locked_blocking_prior_id(
+                                _idem_cache_key(self._path),
+                                handle,
+                                action_name,
+                                idempotency_key,
                             )
                         previous_hash = _read_last_event_hash(handle)
                         event = build(previous_hash, blocking)
                         line = json.dumps(
                             event, sort_keys=True, separators=(",", ":"), ensure_ascii=False
                         )
+                        encoded = line.encode("utf-8") + b"\n"
                         handle.seek(0, io.SEEK_END)
-                        handle.write(line.encode("utf-8") + b"\n")
+                        size_before = handle.tell()
+                        handle.write(encoded)
                         handle.flush()
                         os.fsync(handle.fileno())
+                        _note_idem_append(
+                            self._path,
+                            event,
+                            size_before,
+                            previous_hash,
+                            size_before + len(encoded),
+                            event.get("event_hash")
+                            if isinstance(event.get("event_hash"), str)
+                            else None,
+                        )
                     finally:
                         _unlock_file(handle)
             except JournalError:
@@ -328,7 +517,7 @@ class FileJournal:
 _TAIL_READ_BYTES = 64 * 1024
 
 
-def _read_last_event_hash(handle: io.BufferedRandom) -> str | None:
+def _read_last_event_hash(handle: io.BufferedRandom | io.BufferedReader) -> str | None:
     """The ``event_hash`` of the last journal line, or None for an empty file.
 
     Reads backward from the end rather than scanning forward from byte zero.
@@ -365,7 +554,7 @@ def _read_last_event_hash(handle: io.BufferedRandom) -> str | None:
         window *= 2
 
 
-def _event_hash_from_line(line: bytes, handle: io.BufferedRandom) -> str:
+def _event_hash_from_line(line: bytes, handle: io.BufferedRandom | io.BufferedReader) -> str:
     try:
         event = json.loads(line.decode("utf-8"))
         event_hash = event["event_hash"]
@@ -404,7 +593,14 @@ def find_completed_idempotent_decision(
     chain is verified separately); only decision/outcome pairs that form a
     completed success count — anything else must not block a retry. Results
     are cached against the file stat (see :func:`_precheck_cached`).
+
+    An exact in-process index answers first when it describes the file;
+    otherwise the scan below runs, unchanged.
     """
+    indexed = _tables_for_unlocked_path(path)
+    if indexed is not None:
+        _, tables = indexed
+        return _indexed_completed_prior(tables, action_name, idempotency_key)
     token = _precheck_token(path)
     if token is not None:
         hit, cached = _precheck_cached(token, "completed", action_name, idempotency_key)
@@ -537,6 +733,128 @@ def _scan_blocking_idempotent(
     return prior_id if isinstance(prior_id, str) else None
 
 
+def _tables_for_unlocked_path(path: Path) -> tuple[str, _IdemTables] | None:
+    """Cached tables for *path* iff the file still matches them exactly.
+
+    Opens its own handle without the journal lock (pre-check callers are
+    unlocked by contract): a torn concurrent write surfaces as a parse error
+    and falls back to a scan. A head match proves prefix equality because the
+    head hash-chains the entire content, so a hit is exact, never heuristic.
+    """
+    if not _USE_IDEM_INDEX:
+        return None
+    key = _idem_cache_key(path)
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, io.SEEK_END)
+            size = handle.tell()
+            head = GENESIS_PREVIOUS_HASH if size == 0 else _read_last_event_hash(handle)
+    except (OSError, JournalError):
+        return None
+    tables = _cached_idem_tables(key, size, head)
+    return (key, tables) if tables is not None else None
+
+
+def _indexed_completed_prior(
+    tables: _IdemTables, action_name: str, idempotency_key: str
+) -> dict[str, Any] | None:
+    """First allowed+succeeded decision for *(action, key)* in file order."""
+    for event_id in tables.by_key.get((action_name, idempotency_key), ()):
+        event = tables.decisions[event_id]
+        linked = tables.outcomes.get(event_id, [])
+        if event.get("decision") == "allowed" and any(
+            outcome.get("status") == "succeeded" for outcome in linked
+        ):
+            return event
+    return None
+
+
+def _indexed_blocking_prior(
+    tables: _IdemTables, action_name: str, idempotency_key: str
+) -> dict[str, Any] | None:
+    """Blocking prior decision for *(action, key)* via the shared predicate.
+
+    Only same-key decisions are replayed; the predicate skips nothing it
+    would otherwise return, so the answer matches a full scan exactly.
+    """
+    candidates = {
+        event_id: tables.decisions[event_id]
+        for event_id in tables.by_key.get((action_name, idempotency_key), ())
+    }
+    return _blocking_prior_from_state(
+        candidates, tables.outcomes, action_name, idempotency_key, tables.resolutions
+    )
+
+
+def _locked_blocking_prior_id(
+    path_key: str, handle: io.BufferedRandom, action_name: str, idempotency_key: str
+) -> str | None:
+    """Authoritative blocking check with an index fast path (call under lock).
+
+    On an index hit no scan runs; on any miss, staleness, or error the full
+    scan runs and rebuilds the tables, so behavior (including failure modes
+    on corrupt tails) is identical to scanning every time.
+    """
+    if _USE_IDEM_INDEX:
+        try:
+            size, head = _locked_handle_state(handle)
+            tables = _cached_idem_tables(path_key, size, head)
+            if tables is None:
+                tables = _collect_idem_tables(handle)
+                _cache_idem_tables(path_key, size, head, tables)
+            prior = _indexed_blocking_prior(tables, action_name, idempotency_key)
+            prior_id = prior.get("event_id") if prior is not None else None
+            return prior_id if isinstance(prior_id, str) else None
+        except (OSError, JournalError):
+            pass
+    return _scan_blocking_idempotent(handle, action_name, idempotency_key)
+
+
+def _note_idem_append(
+    path: Path,
+    event: dict[str, Any],
+    pre_size: int,
+    pre_head: str | None,
+    post_size: int,
+    post_head: str | None,
+) -> None:
+    """Fold a just-appended event into the cached tables, when possible.
+
+    Evolves the entry only if it described exactly the pre-append prefix;
+    otherwise drops it (a foreign write interleaved — the next idempotent
+    check rebuilds under lock). Never builds tables: that keeps a scan off
+    the keyless fast path. Never raises: index trouble must not break the
+    write path, so any failure drops the entry and the next check rescans.
+    """
+    if not _USE_IDEM_INDEX:
+        return
+    if not isinstance(post_head, str):
+        try:
+            _drop_idem_tables(_idem_cache_key(path))
+        except Exception:  # noqa: S110 - index trouble must never break the write path
+            pass
+        return
+    try:
+        key = _idem_cache_key(path)
+        with _IDEM_TABLES_GUARD:
+            entry = _IDEM_TABLES_CACHE.get(key)
+            if entry is None:
+                return
+            if (entry[0], entry[1]) != (pre_size, pre_head):
+                _IDEM_TABLES_CACHE.pop(key, None)
+                return
+            tables = entry[2]
+            _evolve_idem_tables(tables, event)
+            _IDEM_TABLES_CACHE[key] = (post_size, post_head, tables)
+            while len(_IDEM_TABLES_CACHE) > _IDEM_INDEX_MAX_PATHS:
+                _IDEM_TABLES_CACHE.pop(next(iter(_IDEM_TABLES_CACHE)))
+    except Exception:
+        try:
+            _drop_idem_tables(_idem_cache_key(path))
+        except Exception:  # noqa: S110 - dropping the entry is best-effort too
+            pass
+
+
 def find_blocking_idempotent_decision(
     path: Path, action_name: str, idempotency_key: str
 ) -> dict[str, Any] | None:
@@ -546,7 +864,14 @@ def find_blocking_idempotent_decision(
     :meth:`FileJournal.append_event_atomic` under lock. Returns the prior
     decision event, or None. Results are cached against the file stat (see
     :func:`_precheck_cached`).
+
+    An exact in-process index answers first when it describes the file;
+    otherwise the scan below runs, unchanged.
     """
+    indexed = _tables_for_unlocked_path(path)
+    if indexed is not None:
+        _, tables = indexed
+        return _indexed_blocking_prior(tables, action_name, idempotency_key)
     token = _precheck_token(path)
     if token is not None:
         hit, cached = _precheck_cached(token, "blocking", action_name, idempotency_key)
