@@ -74,6 +74,10 @@ Production-hardening release (Python + TypeScript sibling, same version):
   audit state.
 - TypeScript sibling parity: `WitnessFreshnessProvider` and `pruneWitnesses`
   ported with vitest suites (`policy.test.ts`, `prune.test.ts`).
+- `RuleProvider.explain` + `interceptor policy-test --policy/--action/--risk
+  [--expect]`: evaluate policy-as-config without executing anything (exit 0
+  only on an expected decision, for CI gates); ported to the TypeScript
+  `RuleProvider` as well.
 
 ### Fixed (engineering-review batch)
 - `approval="never"` with an `approval_provider` is now a decoration-time
