@@ -238,7 +238,8 @@ policy = AllOf(
     [
         BudgetProvider(100, per_action=True),
         WitnessFreshnessProvider(
-            "/mnt/backup-witness", max_age_seconds=600,
+            "/mnt/backup-witness",
+            max_age_seconds=600,
             risks={"high", "critical"},
         ),
     ]
