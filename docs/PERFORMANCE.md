@@ -21,10 +21,21 @@ input summaries, and retention records dominate).
 - **Latency**: each guarded call pays two fsyncs (~5 ms total here). That is
   the durability price; never batch it away by skipping fsync.
 - **Verification is streaming**: memory is bounded by the largest single event,
-  so multi-million-event journals verify in one pass. `audit` retains parsed
-  events — for very large journals, audit per rotated file instead.
-- **Idempotency scans**: calls *with* `idempotency_key` scan the file journal
-  for the prior key (full scan pre-check + locked scan at append). Keep
-  journals small via `archive` when idempotent actions are hot.
+  so multi-million-event journals verify in one pass. `audit` is streaming
+  too (`audit_journal_streaming`, used by the CLI): one pass retaining one
+  small record per decision plus the event-id set, instead of full event
+  bodies. For very large journals, audit per rotated file instead.
+- **Idempotency checks**: calls *with* `idempotency_key` consult an exact
+  in-process index validated by `(journal size, tail hash)` under the same
+  file lock — no per-call scan, and queries touch only same-key decisions
+  via a `(action, key)` secondary index. Measured with
+  `benchmarks/bench_idempotent.py` (unique key per call, same laptop class
+  as above): **~309 guarded calls/s at 400 events, ~306/s at 4,000 events**
+  (~3.3 ms/call flat), up from ~32–46/s with per-call scans. A mismatch
+  (foreign writer, rotation, restore, sibling implementation) falls back to
+  one scan and rebuilds, so the index can only cost a fallback, never a
+  wrong answer. Pure keyless journals build no index at all. Keep sharding
+  hot keys across journals per action family past ~100k events — the index
+  holds one record per unique key, so rotation still bounds memory.
 - **Rotation trigger**: archive well before files get unwieldy — 100k events
   (~80 MiB) is a comfortable operating point; verify stays linear throughout.
