@@ -194,6 +194,25 @@ def test_verify_warns_on_stale_covering_witness(evidence_home, tmp_path, capsys)
     assert payload["witness_age_seconds"] is not None and payload["witness_age_seconds"] > 3000
 
 
+def test_audit_max_events_refuses_oversized_journal(evidence_home, capsys):
+    from interceptor.errors import EvidenceAuditError
+
+    record()
+    record(action="cli.second")
+    with pytest.raises(EvidenceAuditError, match="max-events"):
+        from interceptor import audit_journal_streaming
+        from interceptor.identity import load_trusted_public_keys
+
+        audit_journal_streaming(
+            evidence_home / "journal.jsonl",
+            load_trusted_public_keys(evidence_home),
+            max_events=1,
+        )
+    assert main(["audit", "--max-events", "1"]) == EXIT_FAILURE
+    assert "max-events" in capsys.readouterr().err
+    assert main(["audit", "--max-events", "100"]) == EXIT_OK
+
+
 def test_unknown_command_is_a_usage_error(capsys):
     with pytest.raises(SystemExit) as caught:
         main(["nonsense"])
