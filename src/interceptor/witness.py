@@ -104,7 +104,9 @@ def _durable_copy(source: Path, target: Path) -> Path:
     tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     try:
         shutil.copyfile(source, tmp)
-        with open(tmp, "rb") as handle:
+        # Read-write handle (not read-only): os.fsync on a read-only fd
+        # raises EBADF on Windows. "r+b" never truncates; the file exists.
+        with open(tmp, "r+b") as handle:
             os.fsync(handle.fileno())
         os.replace(tmp, target)
         _fsync_dir(target.parent)
