@@ -144,10 +144,16 @@ def _extract_receipt(
 
 
 #: (journal_key, action_name, idempotency_key) triples that completed with a
-#: recorded ``succeeded`` outcome in this process. Guards cross-process
-#: duplicates via the journal scan; this set covers custom JournalStores and
-#: avoids re-scanning for keys this process already completed.
-_COMPLETED_IDEMPOTENCY: set[tuple[str, str, str]] = set()
+#: recorded ``succeeded`` outcome in this process. File-backed journals keep
+#: their triples in a FIFO-capped map: eviction is safe because the journal
+#: scan (or the exact index) stays authoritative across processes, so a
+#: dropped entry costs at most one rescan. Custom JournalStores have no
+#: on-disk scan to fall back on — their in-process set is the only dedup —
+#: so their triples are kept uncapped (custom stores are test/ephemeral
+#: scope; production journals are files).
+_COMPLETED_FILE_MAX = 8192
+_COMPLETED_FILE: dict[tuple[str, str, str], None] = {}
+_COMPLETED_CUSTOM: set[tuple[str, str, str]] = set()
 _COMPLETED_IDEMPOTENCY_LOCK = threading.Lock()
 
 #: Stable per-store tokens that never reuse ``id()`` addresses. A token is
@@ -209,18 +215,28 @@ def _journal_key(store: JournalStore) -> str:
 
 def _mark_completed(store: JournalStore, action_name: str, idempotency_key: str) -> None:
     with _COMPLETED_IDEMPOTENCY_LOCK:
-        _COMPLETED_IDEMPOTENCY.add((_journal_key(store), action_name, idempotency_key))
+        triple = (_journal_key(store), action_name, idempotency_key)
+        if triple[0].startswith("file:"):
+            _COMPLETED_FILE[triple] = None
+            while len(_COMPLETED_FILE) > _COMPLETED_FILE_MAX:
+                _COMPLETED_FILE.pop(next(iter(_COMPLETED_FILE)))
+        else:
+            _COMPLETED_CUSTOM.add(triple)
 
 
 def _is_completed(store: JournalStore, action_name: str, idempotency_key: str) -> bool:
     with _COMPLETED_IDEMPOTENCY_LOCK:
-        return (_journal_key(store), action_name, idempotency_key) in _COMPLETED_IDEMPOTENCY
+        triple = (_journal_key(store), action_name, idempotency_key)
+        if triple[0].startswith("file:"):
+            return triple in _COMPLETED_FILE
+        return triple in _COMPLETED_CUSTOM
 
 
 def reset_idempotency_state() -> None:
     """Forget in-process completions. For tests only."""
     with _COMPLETED_IDEMPOTENCY_LOCK:
-        _COMPLETED_IDEMPOTENCY.clear()
+        _COMPLETED_FILE.clear()
+        _COMPLETED_CUSTOM.clear()
 
 
 def _resolve_idempotency_key(
