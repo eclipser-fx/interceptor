@@ -2,12 +2,16 @@
  * Policy providers: budgets enforce, attested stamps identity, checkpoint
  * commits the tail atomically.
  */
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
-import { AttestedApprovalProvider, BudgetProvider } from "../src/Policy.js";
+import {
+  AttestedApprovalProvider,
+  BudgetProvider,
+  WitnessFreshnessProvider,
+} from "../src/Policy.js";
 import { checkpointJournal } from "../src/Checkpoint.js";
 import { guard } from "../src/Guard.js";
 import { generateIdentity } from "../src/Identity.js";
@@ -230,6 +234,76 @@ describe("AttestedApprovalProvider", () => {
       new AttestedApprovalProvider(allowInner, undefined, "INTERCEPTOR_DEFINITELY_UNSET").decide(req),
     );
     expect(missing.decision).toBe("denied");
+  });
+});
+
+describe("WitnessFreshnessProvider", () => {
+  const stamp = (file: string, seconds: number): void => {
+    writeFileSync(file, "witness");
+    utimesSync(file, seconds, seconds);
+  };
+
+  it("allows fresh witnesses and denies stale or missing ones", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "ic-fresh-"));
+    const witness = path.join(dir, "latest.checkpoint");
+    stamp(witness, 1_700_000_000);
+    const fresh = new WitnessFreshnessProvider(witness, 300, { clock: () => 1_700_000_010 });
+    expect((await Effect.runPromise(fresh.decide(req))).decision).toBe("allowed");
+    const stale = new WitnessFreshnessProvider(witness, 300, { clock: () => 1_700_001_000 });
+    const denial = await Effect.runPromise(stale.decide(req));
+    expect(denial.decision).toBe("denied");
+    expect(denial.reason).toContain("stale");
+
+    const missing = new WitnessFreshnessProvider(path.join(dir, "absent.checkpoint"), 300, {
+      clock: () => 1_700_000_010,
+    });
+    expect((await Effect.runPromise(missing.decide(req))).decision).toBe("denied");
+  });
+
+  it("never deletes through a directory witness and bypasses other risks", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "ic-fresh-"));
+    mkdirSync(path.join(dir, "latest.checkpoint"));
+    const asDir = new WitnessFreshnessProvider(path.join(dir, "latest.checkpoint"), 300, {
+      clock: () => 1_700_000_010,
+    });
+    expect((await Effect.runPromise(asDir.decide(req))).decision).toBe("denied");
+
+    const witness = path.join(dir, "w.checkpoint");
+    stamp(witness, 1_000);
+    const scoped = new WitnessFreshnessProvider(witness, 300, {
+      risks: ["high", "critical"],
+      clock: () => 1_700_000_010,
+    });
+    expect((await Effect.runPromise(scoped.decide({ ...req, risk: "low" }))).decision).toBe(
+      "allowed",
+    );
+    expect((await Effect.runPromise(scoped.decide(req))).decision).toBe("denied");
+  });
+
+  it("rejects invalid configuration", () => {
+    expect(() => new WitnessFreshnessProvider("w", 0)).toThrow("maxAgeSeconds must be positive");
+    expect(() => new WitnessFreshnessProvider("w", 60, { risks: ["bogus"] })).toThrow(
+      "unknown risks",
+    );
+    expect(() => new WitnessFreshnessProvider("sub/dir", 60)).not.toThrow();
+    expect(() => new WitnessFreshnessProvider("sub\\dir", 60)).toThrow("plain file");
+  });
+
+  it("denies guarded calls when the witness is stale", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "ic-fresh-"));
+    const journal = makeFileJournal(path.join(dir, "j.jsonl"));
+    const identity = await Effect.runPromise(generateIdentity());
+    const witness = path.join(dir, "latest.checkpoint");
+    stamp(witness, 1_000);
+    const gate = new WitnessFreshnessProvider(witness, 300, { clock: () => 1_700_000_010 });
+    const act = guard({
+      action: "paid.act",
+      journal,
+      approve: (r) => gate.decide(r),
+      identity,
+    })(() => "ok");
+    const exit = await Effect.runPromise(Effect.exit(act()));
+    expect(exit._tag).toBe("Failure");
   });
 });
 
