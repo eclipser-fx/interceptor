@@ -8,10 +8,18 @@ the chain, checks every shipped witness stays covered, and audits for
 ```sh
 sudo cp deploy/systemd/interceptor-*.service deploy/systemd/interceptor-*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now interceptor-witness.timer interceptor-verify.timer
+sudo systemctl enable --now interceptor-witness.timer interceptor-verify.timer \
+  interceptor-witness-prune.timer
 systemctl list-timers 'interceptor-*'
-journalctl -u interceptor-witness.service -u interceptor-verify.service -f
+journalctl -u interceptor-witness.service -u interceptor-verify.service \
+  -u interceptor-witness-prune.service -f
 ```
+
+`interceptor-witness-prune.timer` runs monthly (`--keep 2000`, ~7 days of
+depth at a 5-minute cadence); tune `INTERCEPTOR_WITNESS_KEEP` to your
+forensics window. Every `ExecStart` line is covered by
+`tests/test_deploy_units.py`, which checks each subcommand and flag against
+the real CLI parser — a typo'd flag fails CI, not a 3am timer.
 
 Configure:
 
