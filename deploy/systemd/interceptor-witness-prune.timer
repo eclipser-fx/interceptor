@@ -1,0 +1,15 @@
+[Unit]
+Description=interceptor witness prune monthly (bounded retention)
+Documentation=https://github.com/wiramahendra/guardrail-evidence/blob/main/docs/DEPLOYMENT.md
+
+[Timer]
+# Matches DEPLOYMENT.md retention: monthly, keep newest 2000 (~7 days of
+# depth at a 5-minute witness cadence; the newest bound is what detects
+# truncation operationally).
+OnCalendar=monthly
+Persistent=true
+RandomizedDelaySec=3600
+Unit=interceptor-witness-prune.service
+
+[Install]
+WantedBy=timers.target
