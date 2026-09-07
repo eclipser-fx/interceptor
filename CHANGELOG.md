@@ -34,6 +34,29 @@ pre-1.0 additive-only discipline until then).
 - `WitnessFreshnessProvider`: deny unless `witness_dir/latest.checkpoint` is
   fresh (`max_age_seconds`), with optional `risks=` subset enforcement —
   turns tail-truncation defense into an approval gate.
+- Production ops: `benchmarks/bench_idempotent.py` (idempotent hot-path
+  envelope: ~32–46/s at 400 events, 4–6× slower than keyless — shard/archive
+  hot keys), `deploy/systemd/` witness + verify timers with `OnFailure`
+  paging contract, `PERFORMANCE.md` idempotency numbers.
+- `interceptor audit --status/--limit`: triage filtering for large journals
+  (display only — counts and fail-closed exit codes always reflect the full
+  journal, so a filter can never mask `needs_reconciliation`).
+- `prune_witnesses` + `interceptor witness-prune --keep N`: bounded witness
+  retention — keeps the newest N shipped witnesses (the strongest truncation
+  bounds), never touches `latest.checkpoint`, keeps unassessable entries
+  rather than deleting them; one witness dir per journal.
+- `audit_journal_streaming` (and the `audit` CLI, which now uses it): identical
+  audit reports from a single pass retaining only the 15 fields the audit
+  reads — no full event bodies, proven equivalent on a rich local journal and
+  every committed vector with audit expectations.
+- In-process idempotency index (`journal.py`): exact `(size, tail-hash)`-
+  validated tables with a per-key secondary index replace the per-call
+  pre-check and locked scans (~306 guarded calls/s flat from 400 to 4,000
+  events, vs ~32–46/s with scans); any mismatch falls back to a scan and
+  rebuilds, keyless journals build nothing, exotic platforms keep the old
+  scan path. Proven step-by-step equivalent to scans, plus thread (8×) and
+  multiprocess (4× spawn) same-key races with exactly one execution and a
+  2,000-call soak (verify + streaming audit clean).
 
 ### Fixed (engineering-review batch)
 - `approval="never"` with an `approval_provider` is now a decoration-time
