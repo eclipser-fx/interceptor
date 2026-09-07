@@ -1,0 +1,24 @@
+[Unit]
+Description=interceptor: checkpoint journal and ship witness off-host
+Documentation=https://github.com/wiramahendra/guardrail-evidence/blob/main/docs/DEPLOYMENT.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Run as the app user; the witness dir MUST live where the journal cannot
+# reach (separate mount / second host sync / WORM bucket sync target).
+User=interceptor
+Group=interceptor
+# Override via `systemctl edit`: journal path, witness dir, optional key.
+Environment=INTERCEPTOR_JOURNAL=%h/.interceptor/journal.jsonl
+Environment=INTERCEPTOR_WITNESS_DIR=/mnt/backup-witness
+# Optional: Environment=INTERCEPTOR_COUNTER_KEY=/etc/interceptor/counter.pem
+ExecStart=/usr/local/bin/interceptor witness --journal ${INTERCEPTOR_JOURNAL} --witness-dir ${INTERCEPTOR_WITNESS_DIR}
+# Fail loudly; the timer's OnFailure can page. Never fall back to silent skip.
+SuccessExitStatus=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/backup-witness %h/.interceptor
