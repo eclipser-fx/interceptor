@@ -184,10 +184,13 @@ def test_wrap_tool_custom_redact_names(evidence_home):
         return user_id
 
     wrapped = wrap_tool(verify, action="test.wrap.pin", redact=["pin"], approval_provider=allow())
-    wrapped("u1", "1234")
+    # Long, non-hex secret: a short numeric PIN like "1234" can appear by
+    # chance inside a timestamp or UUID elsewhere in the journal, flaking
+    # the absence assertion. This value cannot occur in either.
+    wrapped("u1", "pin-SECRET-987654321")
 
     text = (evidence_home / "journal.jsonl").read_text()
-    assert "1234" not in text
+    assert "pin-SECRET-987654321" not in text
 
 
 def test_wrap_tool_records_redacted_metadata(evidence_home):
