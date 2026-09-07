@@ -80,6 +80,56 @@ def audit_journal(path: Path, public_keys: PublicKeys) -> AuditReport:
     return audit_verified_snapshot(load_journal_snapshot(path, public_keys))
 
 
+#: The only event fields the audit reads. Everything else — input summaries,
+#: retention records, approval reasons, receipts, error text, signatures and
+#: hashes — is verification material, not audit material, and streaming
+#: audits do not retain it.
+_AUDIT_EVENT_FIELDS = frozenset(
+    {
+        "event_id",
+        "event_type",
+        "decision_event_id",
+        "decision",
+        "action_id",
+        "action_name",
+        "contract_hash",
+        "input_hash",
+        "risk",
+        "approval_mode",
+        "timestamp_utc",
+        "dry_run",
+        "idempotency_key",
+        "status",
+        "resolution",
+    }
+)
+
+
+def _project_audit_event(event: dict[str, Any]) -> dict[str, Any]:
+    """The audit-readable subset of *event*.
+
+    Runs during the single verification pass, so the full body is available
+    to the verifier but never retained. Behavior-identical to auditing the
+    full event: verification guarantees every required field is present, and
+    the audit reads nothing outside this set.
+    """
+    return {key: event.get(key) for key in _AUDIT_EVENT_FIELDS}
+
+
+def audit_journal_streaming(path: Path, public_keys: PublicKeys) -> AuditReport:
+    """Verify *path* and audit it in a single streaming pass.
+
+    Identical results to :func:`audit_journal` (same report, same refusal on
+    journals that fail verification), but peak memory is bounded by the audit
+    state — one small record per decision plus the event-id set — instead of
+    the full event bodies. Prefer this for large or rotated journals; the
+    CLI uses it for every ``audit`` invocation.
+    """
+    return audit_verified_snapshot(
+        load_journal_snapshot(path, public_keys, project=_project_audit_event)
+    )
+
+
 def audit_verified_snapshot(snapshot: JournalSnapshot) -> AuditReport:
     """Build an audit only from a cryptographically valid immutable snapshot."""
     if not snapshot.verification.valid:
