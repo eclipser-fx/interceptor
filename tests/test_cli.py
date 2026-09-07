@@ -213,6 +213,70 @@ def test_audit_max_events_refuses_oversized_journal(evidence_home, capsys):
     assert main(["audit", "--max-events", "100"]) == EXIT_OK
 
 
+def _policy_file(tmp_path, rules, default="denied"):
+    import json as _json
+
+    path = tmp_path / "policy.json"
+    path.write_text(_json.dumps({"default": default, "rules": rules}))
+    return path
+
+
+def test_policy_test_reports_match_and_default(tmp_path, capsys):
+    path = _policy_file(
+        tmp_path,
+        [{"action": "billing.*", "decision": "denied", "reason": "money needs a human"}],
+    )
+    assert (
+        main(["policy-test", "--policy", str(path), "--action", "billing.refund", "--risk", "high"])
+        == EXIT_OK
+    )
+    assert "rule 0" in capsys.readouterr().out
+    assert (
+        main(
+            [
+                "policy-test",
+                "--policy",
+                str(path),
+                "--action",
+                "deploy.prod",
+                "--risk",
+                "low",
+                "--json",
+            ]
+        )
+        == EXIT_OK
+    )
+    import json as _json
+
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "denied"
+    assert payload["matched_rule"] is None
+    assert payload["synthetic"] is True
+
+
+def test_policy_test_expect_gates_exits(tmp_path, capsys):
+    path = _policy_file(tmp_path, [{"action": "*", "decision": "allowed"}])
+    base = ["policy-test", "--policy", str(path), "--action", "a.b", "--risk", "low"]
+    assert main([*base, "--expect", "allowed"]) == EXIT_OK
+    assert main([*base, "--expect", "denied"]) == EXIT_FAILURE
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "policy-test",
+                "--policy",
+                str(tmp_path / "absent.json"),
+                "--action",
+                "a",
+                "--risk",
+                "low",
+            ]
+        )
+        == EXIT_FAILURE
+    )
+    assert "invalid policy file" in capsys.readouterr().err
+
+
 def test_unknown_command_is_a_usage_error(capsys):
     with pytest.raises(SystemExit) as caught:
         main(["nonsense"])
