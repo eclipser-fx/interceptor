@@ -324,6 +324,70 @@ def test_custom_store_completions_are_not_capped():
     assert _is_completed(store, "custom.act", "key-0")  # type: ignore[arg-type]
 
 
+def test_custom_store_completions_purged_on_collection():
+    import gc
+
+    from interceptor.engine import _COMPLETED_CUSTOM, _is_completed, _mark_completed
+
+    class MemoryStore:
+        @property
+        def path(self):  # type: ignore[no-untyped-def]
+            raise RuntimeError("no path")
+
+        def append_event(self, build):  # type: ignore[no-untyped-def]
+            raise AssertionError("not used")
+
+    store = MemoryStore()
+    for index in range(3):
+        _mark_completed(store, "custom.act", f"key-{index}")  # type: ignore[arg-type]
+    assert len(_COMPLETED_CUSTOM) == 3
+    assert _is_completed(store, "custom.act", "key-0")  # type: ignore[arg-type]
+    del store
+    gc.collect()
+    assert _COMPLETED_CUSTOM == set()
+
+
+def test_custom_store_guard_flow_and_collection():
+    import gc
+
+    from interceptor import guard
+    from interceptor.engine import _COMPLETED_CUSTOM
+    from interceptor.errors import DuplicateActionError
+
+    class MemoryStore:
+        def __init__(self) -> None:
+            self.events: list[dict] = []
+
+        @property
+        def path(self):  # type: ignore[no-untyped-def]
+            raise RuntimeError("no path")
+
+        def append_event(self, build):  # type: ignore[no-untyped-def]
+            event = build(None)
+            self.events.append(event)
+            return event
+
+    store = MemoryStore()
+
+    @guard(
+        action="custom.flow",
+        journal=store,  # type: ignore[arg-type]
+        approval_provider=allow(),
+        idempotency_key="k",
+    )
+    def act(k: str) -> str:
+        return "ok"
+
+    act("a")
+    with pytest.raises(DuplicateActionError):
+        act("a")
+    assert len(_COMPLETED_CUSTOM) == 1
+    del store
+    del act
+    gc.collect()
+    assert _COMPLETED_CUSTOM == set()
+
+
 def test_scan_fallback_without_index_flag(tmp_path: Path, no_index):
     journal = tmp_path / "j.jsonl"
 
