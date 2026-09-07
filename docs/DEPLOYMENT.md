@@ -6,6 +6,16 @@ operations. Read `THREAT_MODEL.md` first — this guide implements its
 
 ## 1. Witness on a schedule (closes tail truncation)
 
+Preferred: systemd timers in `deploy/systemd/` (witness every 5 min, verify +
+witness-audit + audit every 15 min; any non-zero exit pages via `OnFailure`):
+
+```sh
+sudo cp deploy/systemd/interceptor-*.service deploy/systemd/interceptor-*.timer /etc/systemd/system/
+sudo systemctl enable --now interceptor-witness.timer interceptor-verify.timer
+```
+
+Cron equivalent (when systemd is unavailable):
+
 ```cron
 */5 * * * * interceptor witness --witness-dir /mnt/backup-witness >>/var/log/interceptor-witness.log 2>&1
 0   * * * * interceptor verify --checkpoint /mnt/backup-witness/latest.checkpoint || page-oncall
@@ -52,7 +62,8 @@ policy = AllOf(
     [
         inner_policy,
         WitnessFreshnessProvider(
-            "/mnt/backup-witness", max_age_seconds=600,
+            "/mnt/backup-witness",
+            max_age_seconds=600,
             risks={"high", "critical"},
         ),
     ]
@@ -107,7 +118,14 @@ AWS equivalent: write the same 20-line fetcher over CloudTrail
 - Alert on: `verify` failure, `audit` needing reconciliation, spending-budget
   denials spiking, witness age exceeding 2× the schedule.
 - Retention: keep journals + witnesses + archived predecessors together per
-  environment. If erasure is required (GDPR), purge only after `inspect`
+  environment. A 5-minute witness schedule writes ~105k files a year, so prune
+  monthly — keeping the newest witnesses preserves the strongest truncation
+  bounds, only historical depth is lost (one directory per journal; never mix
+  journals in one witness dir or pruning cannot stay per-journal):
+  ```cron
+  0 3 1 * * interceptor witness-prune --witness-dir /mnt/backup-witness --keep 2000
+  ```
+  If erasure is required (GDPR), purge only after `inspect`
   confirms full redaction, and record the purge itself out-of-band — a gap in
   the chain is evidence of a gap, nothing more.
 - Ship `FanoutJournalStore` mirrors to a second disk as a cheap second copy;
