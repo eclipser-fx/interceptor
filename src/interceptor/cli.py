@@ -14,6 +14,8 @@ never modify the journal; mutating ones (``checkpoint``, ``countersign``,
     interceptor witness-audit --witness-dir DIR [--journal PATH] [--public-key PATH] [--json]
     interceptor witness-prune --witness-dir DIR --keep N [--json]
     interceptor audit [--journal PATH] [--public-key PATH] [--status S] [--limit N] [--json]
+    interceptor policy-test --policy FILE --action NAME --risk RISK
+                      [--expect allowed|denied] [--json]
     interceptor checkpoint [--journal PATH] [--witness PATH] [--json]
     interceptor countersign --signing-key PATH [--journal PATH] [--json]
     interceptor resolve --decision ID --result completed|not-completed [--journal PATH]
@@ -227,6 +229,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit.add_argument("--json", action="store_true", help="emit JSON")
 
+    policy_test = subparsers.add_parser(
+        "policy-test",
+        help="evaluate a policy file for an action and risk without executing anything",
+    )
+    policy_test.add_argument("--policy", type=Path, required=True, help="JSON policy file")
+    policy_test.add_argument("--action", required=True, help="action name to evaluate")
+    policy_test.add_argument(
+        "--risk",
+        required=True,
+        choices=["low", "medium", "high", "critical"],
+        help="risk level to evaluate",
+    )
+    policy_test.add_argument(
+        "--expect",
+        choices=["allowed", "denied"],
+        default=None,
+        help="exit 0 only when the decision matches (for CI gates); "
+        "without it, exit 0 means the policy evaluated",
+    )
+    policy_test.add_argument("--json", action="store_true", help="emit JSON")
+
     resolve = subparsers.add_parser(
         "resolve", help="record a signed operator resolution for a reconciled decision"
     )
@@ -338,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_witness_audit(args)
         if args.command == "witness-prune":
             return _cmd_witness_prune(args)
+        if args.command == "policy-test":
+            return _cmd_policy_test(args)
         if args.command == "key-info":
             return _cmd_key_info(args)
         if args.command == "key-rotate":
@@ -987,6 +1012,56 @@ def _cmd_witness_prune(args: argparse.Namespace) -> int:
             print(f"    {path}")
         if not report.kept and not report.deleted:
             print("  (no shipped witnesses; nothing to do)")
+    return EXIT_OK
+
+
+def _cmd_policy_test(args: argparse.Namespace) -> int:
+    from .approval import ApprovalRequest
+    from .errors import PolicyError
+    from .policy import load_policy_file
+
+    try:
+        provider = load_policy_file(args.policy)
+    except PolicyError as exc:
+        _fail(f"invalid policy file: {exc}", as_json=args.json)
+        return EXIT_FAILURE
+    # Synthetic request: declarative rules read only the action name and
+    # the risk, so hashes and summaries are placeholders. The output says
+    # so explicitly — this is a policy check, never evidence.
+    request = ApprovalRequest(
+        action_name=args.action,
+        risk=args.risk,
+        approval_mode="required",
+        redacted_input_summary="",
+        input_hash="0" * 64,
+        contract_hash="0" * 64,
+    )
+    explanation = provider.explain(request)
+    matched = (
+        {"index": explanation.matched_index, "action": explanation.matched_action}
+        if explanation.matched_index is not None
+        else None
+    )
+    payload = {
+        "policy": str(args.policy),
+        "action": args.action,
+        "risk": args.risk,
+        "synthetic": True,
+        "decision": explanation.decision,
+        "reason": explanation.reason,
+        "matched_rule": matched,
+        "total_rules": explanation.total_rules,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    elif matched is not None:
+        print(f"{explanation.decision:8} {args.action} ({args.risk})")
+        print(f"  rule {matched['index']}: {matched['action']!r} ({explanation.reason})")
+    else:
+        print(f"{explanation.decision:8} {args.action} ({args.risk})")
+        print(f"  default ({explanation.reason})")
+    if args.expect is not None and explanation.decision != args.expect:
+        return EXIT_FAILURE
     return EXIT_OK
 
 
