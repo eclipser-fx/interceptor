@@ -1,0 +1,13 @@
+[Unit]
+Description=interceptor witness every 5 minutes (tail-truncation bound)
+Documentation=https://github.com/wiramahendra/guardrail-evidence/blob/main/docs/DEPLOYMENT.md
+
+[Timer]
+# Matches DEPLOYMENT.md cron: */5 * * * *
+OnCalendar=*:0/5
+Persistent=true
+RandomizedDelaySec=30
+Unit=interceptor-witness.service
+
+[Install]
+WantedBy=timers.target
