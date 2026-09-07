@@ -1,0 +1,13 @@
+[Unit]
+Description=interceptor verify + witness-audit + audit every 15 minutes
+Documentation=https://github.com/wiramahendra/guardrail-evidence/blob/main/docs/DEPLOYMENT.md
+
+[Timer]
+# Matches DEPLOYMENT.md: witness-audit */15, verify hourly at minimum.
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=60
+Unit=interceptor-verify.service
+
+[Install]
+WantedBy=timers.target
