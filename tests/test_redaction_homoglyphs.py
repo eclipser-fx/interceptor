@@ -121,7 +121,9 @@ def test_confused_secret_never_reaches_journal_or_prompt(evidence_home, confused
 
     act({confused: SECRET})
 
-    journal_text = (evidence_home / "journal.jsonl").read_text()
+    # Explicit UTF-8: the default locale codec on Windows cannot decode
+    # the homoglyph names this test deliberately plants in the journal.
+    journal_text = (evidence_home / "journal.jsonl").read_text(encoding="utf-8")
     assert SECRET not in journal_text, f"{confused!r}: secret reached the journal"
 
     prompt_text = provider.seen[0].redacted_input_summary
@@ -136,4 +138,4 @@ def test_confused_error_message_is_scrubbed(evidence_home) -> None:
     with pytest.raises(ValueError):
         act({"api_kеy": SECRET})
 
-    assert SECRET not in (evidence_home / "journal.jsonl").read_text()
+    assert SECRET not in (evidence_home / "journal.jsonl").read_text(encoding="utf-8")
