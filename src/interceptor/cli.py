@@ -218,6 +218,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="show at most N invocations (display only; counts stay full)",
     )
+    audit.add_argument(
+        "--max-events",
+        type=_positive_int,
+        default=None,
+        help="refuse journals with more than N events instead of allocating "
+        "unbounded audit state; audit per rotated file instead",
+    )
     audit.add_argument("--json", action="store_true", help="emit JSON")
 
     resolve = subparsers.add_parser(
@@ -562,7 +569,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         )
         return EXIT_FAILURE
 
-    report = audit_journal_streaming(journal_path, keys)
+    report = audit_journal_streaming(journal_path, keys, max_events=args.max_events)
     counts = {status.value: 0 for status in InvocationStatus}
     for invocation in report.invocations:
         counts[invocation.status.value] += 1
