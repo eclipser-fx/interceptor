@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -203,6 +203,8 @@ def verify_journal(
 def load_journal_snapshot(
     path: Path,
     public_keys: PublicKeys,
+    *,
+    project: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> JournalSnapshot:
     """Read, parse, and verify a journal once for local consumers.
 
@@ -210,11 +212,17 @@ def load_journal_snapshot(
     parsed events themselves — never a full-file buffer or a split copy — so
     peak memory is bounded by the events plus the largest single line.
 
+    When *project* is given, each parsed event is replaced by
+    ``project(event)`` before retention, so consumers that need only a field
+    subset (e.g. the audit) never hold full event bodies. Projection runs on
+    the parsed line before per-event verification and changes nothing about
+    what is verified.
+
     Privacy inspection and evidence sync use the returned events so signed
     content cannot change between verification and subsequent local handling.
     """
     trusted = _to_keyring(public_keys)
-    result, events = _read_and_verify(path, trusted, retain_events=True)
+    result, events = _read_and_verify(path, trusted, retain_events=True, project=project)
     return JournalSnapshot(verification=result, events=events)
 
 
@@ -224,6 +232,7 @@ def _read_and_verify(
     *,
     retain_events: bool,
     checkpoint_path: Path | None = None,
+    project: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> tuple[VerificationResult, tuple[dict[str, Any], ...]]:
     issues: list[VerificationIssue] = []
     events: list[dict[str, Any]] = []
@@ -288,7 +297,7 @@ def _read_and_verify(
                     break
 
                 if retain_events:
-                    events.append(event)
+                    events.append(project(event) if project is not None else event)
                 event_issues = _verify_event(
                     event, line_number, previous_hash, trusted, checkpoints_by_id
                 )
