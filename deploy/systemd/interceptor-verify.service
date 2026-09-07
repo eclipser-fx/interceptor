@@ -1,0 +1,19 @@
+[Unit]
+Description=interceptor: verify journal covers latest witness + audit for reconciliation
+Documentation=https://github.com/wiramahendra/guardrail-evidence/blob/main/docs/DEPLOYMENT.md
+
+[Service]
+Type=oneshot
+User=interceptor
+Group=interceptor
+Environment=INTERCEPTOR_JOURNAL=%h/.interceptor/journal.jsonl
+Environment=INTERCEPTOR_WITNESS_DIR=/mnt/backup-witness
+# Fails (non-zero) on: bad chain, uncovered witness, failed/needs_reconciliation
+# invocations. Wire OnFailure to your pager.
+ExecStart=/bin/sh -c '/usr/local/bin/interceptor verify --journal ${INTERCEPTOR_JOURNAL} --checkpoint ${INTERCEPTOR_WITNESS_DIR}/latest.checkpoint && /usr/local/bin/interceptor witness-audit --journal ${INTERCEPTOR_JOURNAL} --witness-dir ${INTERCEPTOR_WITNESS_DIR} && /usr/local/bin/interceptor audit --journal ${INTERCEPTOR_JOURNAL}'
+SuccessExitStatus=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.interceptor /mnt/backup-witness
