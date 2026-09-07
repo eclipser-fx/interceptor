@@ -11,7 +11,8 @@ never modify the journal; mutating ones (``checkpoint``, ``countersign``,
     interceptor verify-chain [--journal PATH] [--public-key PATH] [--json]
     interceptor witness --witness-dir DIR [--journal PATH] [--counter-key PATH] [--json]
     interceptor witness-audit --witness-dir DIR [--journal PATH] [--public-key PATH] [--json]
-    interceptor audit [--journal PATH] [--public-key PATH] [--json]
+    interceptor witness-prune --witness-dir DIR --keep N [--json]
+    interceptor audit [--journal PATH] [--public-key PATH] [--status S] [--limit N] [--json]
     interceptor checkpoint [--journal PATH] [--witness PATH] [--json]
     interceptor countersign --signing-key PATH [--journal PATH] [--json]
     interceptor resolve --decision ID --result completed|not-completed [--journal PATH]
@@ -37,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .audit import InvocationStatus, audit_journal
+from .audit import InvocationStatus, audit_journal_streaming
 from .checkpoint import checkpoint_journal
 from .errors import InterceptorError
 from .identity import (
@@ -128,6 +129,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     witness_audit.add_argument("--json", action="store_true", help="emit JSON")
 
+    witness_prune = subparsers.add_parser(
+        "witness-prune", help="delete oldest shipped witnesses, keeping the newest N"
+    )
+    witness_prune.add_argument(
+        "--witness-dir", type=Path, required=True, help="directory holding shipped witnesses"
+    )
+    witness_prune.add_argument(
+        "--keep",
+        type=_positive_int,
+        required=True,
+        help="keep the newest N shipped witnesses (oldest deleted; "
+        "the newest bound is what detects truncation)",
+    )
+    witness_prune.add_argument("--json", action="store_true", help="emit JSON")
+
     key_info = subparsers.add_parser("key-info", help="print the local signing identity")
     key_info.add_argument("--json", action="store_true", help="emit JSON")
 
@@ -178,6 +194,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="verifying key path (repeatable; defaults to the trusted key set)",
+    )
+    audit.add_argument(
+        "--status",
+        action="append",
+        default=None,
+        choices=[status.value for status in InvocationStatus],
+        help="show only invocations with this status (repeatable; "
+        "display only — exit code always reflects the full journal)",
+    )
+    audit.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=None,
+        help="show at most N invocations (display only; counts stay full)",
     )
     audit.add_argument("--json", action="store_true", help="emit JSON")
 
@@ -290,6 +320,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_witness(args)
         if args.command == "witness-audit":
             return _cmd_witness_audit(args)
+        if args.command == "witness-prune":
+            return _cmd_witness_prune(args)
         if args.command == "key-info":
             return _cmd_key_info(args)
         if args.command == "key-rotate":
@@ -499,15 +531,28 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         )
         return EXIT_FAILURE
 
-    report = audit_journal(journal_path, keys)
+    report = audit_journal_streaming(journal_path, keys)
     counts = {status.value: 0 for status in InvocationStatus}
     for invocation in report.invocations:
         counts[invocation.status.value] += 1
+    wanted = set(args.status) if args.status else None
+    shown = [item for item in report.invocations if wanted is None or item.status.value in wanted]
+    truncated = False
+    if args.limit is not None and len(shown) > args.limit:
+        shown = shown[: args.limit]
+        truncated = True
     payload = {
         "journal": str(journal_path),
         "structurally_valid": report.structurally_valid,
         "needs_reconciliation": report.needs_reconciliation,
         "counts": counts,
+        "filter": {
+            "statuses": sorted(wanted) if wanted is not None else None,
+            "limit": args.limit,
+            "shown": len(shown),
+            "total": len(report.invocations),
+            "truncated": truncated,
+        },
         "invocations": [
             {
                 "action_name": item.action_name,
@@ -523,7 +568,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
                 "outcome_timestamp_utc": item.outcome_timestamp_utc,
                 "status": item.status.value,
             }
-            for item in report.invocations
+            for item in shown
         ],
         "issues": [
             {"code": issue.code, "message": issue.message, "event_id": issue.event_id}
@@ -534,7 +579,14 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(f"{journal_path}")
-        for item in report.invocations:
+        if wanted is not None or args.limit is not None:
+            print(
+                f"  filter: showing {len(shown)} of {len(report.invocations)}"
+                + (f" status={','.join(sorted(wanted))}" if wanted is not None else "")
+                + (f" limit={args.limit}" if args.limit is not None else "")
+                + (" (truncated)" if truncated else "")
+            )
+        for item in shown:
             print(f"  {item.status.value:24} {item.action_name} ({item.risk})")
             print(f"    decision: {item.decision_event_id}")
             if item.outcome_event_id is not None:
@@ -873,6 +925,31 @@ def _cmd_witness_audit(args: argparse.Namespace) -> int:
             state = "covered" if item.covered else "UNCOVERED"
             print(f"      {state} {item.path} {item.detail}")
     return EXIT_OK if report.valid else EXIT_FAILURE
+
+
+def _cmd_witness_prune(args: argparse.Namespace) -> int:
+    from .witness import prune_witnesses
+
+    report = prune_witnesses(args.witness_dir, args.keep)
+    payload = {
+        "witness_dir": str(report.witness_dir),
+        "keep": args.keep,
+        "kept": [str(path) for path in report.kept],
+        "deleted": [str(path) for path in report.deleted],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Pruned {report.witness_dir} (--keep {args.keep})")
+        print(f"  kept:    {len(report.kept)}")
+        for path in report.kept:
+            print(f"    {path}")
+        print(f"  deleted: {len(report.deleted)}")
+        for path in report.deleted:
+            print(f"    {path}")
+        if not report.kept and not report.deleted:
+            print("  (no shipped witnesses; nothing to do)")
+    return EXIT_OK
 
 
 def _fail(message: str, *, as_json: bool) -> None:
