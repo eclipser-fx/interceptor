@@ -379,20 +379,49 @@ export class RuleProvider {
     this.compiled = rules.map((rule) => ({ rule, pattern: globToRegExp(rule.action) }));
   }
 
-  /** First matching rule decides; otherwise the default (deny unless allowed). */
-  decide(request: ApprovalRequest): ApprovalDecision {
-    for (const { rule, pattern } of this.compiled) {
+  /** What this provider would decide, and which rule says so (or the default). */
+  explain(request: ApprovalRequest): RuleExplanation {
+    for (const [index, { rule, pattern }] of this.compiled.entries()) {
       if (!pattern.test(request.actionName)) continue;
       if (rule.risks !== undefined && !rule.risks.includes(request.risk)) continue;
       return {
         decision: rule.decision,
         reason: rule.reason ?? `matched rule '${rule.action}' -> ${rule.decision}`,
+        matchedIndex: index,
+        matchedAction: rule.action,
+        totalRules: this.compiled.length,
       };
     }
     return this.defaultDecision === "allowed"
-      ? { decision: "allowed", reason: "allowed by policy default" }
-      : { decision: "denied", reason: "no policy rule matched; default deny" };
+      ? {
+        decision: "allowed",
+        reason: "allowed by policy default",
+        matchedIndex: null,
+        matchedAction: null,
+        totalRules: this.compiled.length,
+      }
+      : {
+        decision: "denied",
+        reason: "no policy rule matched; default deny",
+        matchedIndex: null,
+        matchedAction: null,
+        totalRules: this.compiled.length,
+      };
   }
+
+  /** First matching rule decides; otherwise the default (deny unless allowed). */
+  decide(request: ApprovalRequest): ApprovalDecision {
+    const explanation = this.explain(request);
+    return { decision: explanation.decision, reason: explanation.reason };
+  }
+}
+
+export interface RuleExplanation {
+  readonly decision: "allowed" | "denied";
+  readonly reason: string;
+  readonly matchedIndex: number | null;
+  readonly matchedAction: string | null;
+  readonly totalRules: number;
 }
 
 const KNOWN_RISKS = new Set(["low", "medium", "high", "critical"]);
