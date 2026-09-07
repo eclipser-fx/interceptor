@@ -48,6 +48,7 @@ from .audit import (
     AuditReport,
     InvocationStatus,
     audit_journal,
+    audit_journal_streaming,
 )
 from .canonical import REDACTED, Canonicalized, canonical_hash, canonicalize
 from .checkpoint import CheckpointReport, checkpoint_journal
@@ -113,6 +114,7 @@ from .journal import (
     JournalStore,
     find_blocking_idempotent_decision,
     find_completed_idempotent_decision,
+    reset_idem_index,
     reset_precheck_cache,
 )
 from .observer import ActionObserver, reset_notifications
@@ -170,8 +172,10 @@ from .verification import VerificationIssue, VerificationResult, verify_journal
 from .witness import (
     WitnessAuditReport,
     WitnessFileStatus,
+    WitnessPruneReport,
     WitnessReport,
     audit_witnesses,
+    prune_witnesses,
     witness_journal,
 )
 from .wrap_tool import wrap_tool, wrap_tools
@@ -290,11 +294,13 @@ __all__ = [
     "WitnessAuditReport",
     "WitnessFileStatus",
     "WitnessFreshnessProvider",
+    "WitnessPruneReport",
     "WitnessReport",
     "__version__",
     "archive_journal",
     "as_openai_tool",
     "audit_journal",
+    "audit_journal_streaming",
     "audit_witnesses",
     "build_sensitive_set",
     "canonical_hash",
@@ -315,10 +321,12 @@ __all__ = [
     "load_private_key",
     "load_public_key",
     "mcp_tool",
+    "prune_witnesses",
     "reconcile_journal",
     "reconcile_verified_snapshot",
     "record_rotation_event",
     "render_html",
+    "reset_idem_index",
     "reset_idempotency_state",
     "reset_notifications",
     "reset_precheck_cache",
