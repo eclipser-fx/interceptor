@@ -7,6 +7,10 @@ pre-1.0 additive-only discipline until then).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-07
+
+Production-hardening release (Python + TypeScript sibling, same version):
+
 ### Added
 - `spend_from=` on `@guard`/`wrap_tool`: declared spend in minor units, recorded
   as `spend_cents` on decision events and visible to providers.
@@ -35,9 +39,10 @@ pre-1.0 additive-only discipline until then).
   fresh (`max_age_seconds`), with optional `risks=` subset enforcement —
   turns tail-truncation defense into an approval gate.
 - Production ops: `benchmarks/bench_idempotent.py` (idempotent hot-path
-  envelope: ~32–46/s at 400 events, 4–6× slower than keyless — shard/archive
-  hot keys), `deploy/systemd/` witness + verify timers with `OnFailure`
-  paging contract, `PERFORMANCE.md` idempotency numbers.
+  envelope), `deploy/systemd/` witness + verify + monthly prune timers with
+  `OnFailure` paging contract, `tests/test_deploy_units.py` checking every
+  unit's subcommands and flags against the real CLI parser,
+  `PERFORMANCE.md` idempotency numbers.
 - `interceptor audit --status/--limit`: triage filtering for large journals
   (display only — counts and fail-closed exit codes always reflect the full
   journal, so a filter can never mask `needs_reconciliation`).
@@ -59,8 +64,16 @@ pre-1.0 additive-only discipline until then).
   2,000-call soak (verify + streaming audit clean).
 - Bounded in-process idempotency memory (`engine.py`): file-backed completions
   are FIFO-capped (eviction is safe — the journal stays authoritative, at most
-  one rescan); custom-store completions stay uncapped since the process set is
-  their only dedup.
+  one rescan); custom-store completions are lifetime-bound to their store via
+  weakref finalizers (dedup never silently lost, nothing leaks); the dead
+  write-only fallback token map was removed.
+- `interceptor verify --witness-max-age N`: warn (never fail) when the
+  covering checkpoint file is older than N seconds, in text and JSON output.
+- `interceptor audit --max-events N`: refuse oversized journals with an
+  actionable message (audit per rotated file) instead of allocating unbounded
+  audit state.
+- TypeScript sibling parity: `WitnessFreshnessProvider` and `pruneWitnesses`
+  ported with vitest suites (`policy.test.ts`, `prune.test.ts`).
 
 ### Fixed (engineering-review batch)
 - `approval="never"` with an `approval_provider` is now a decoration-time
