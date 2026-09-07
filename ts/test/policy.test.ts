@@ -307,6 +307,30 @@ describe("WitnessFreshnessProvider", () => {
   });
 });
 
+describe("RuleProvider.explain", () => {
+  it("names the first matching rule and the default", async () => {
+    const { RuleProvider } = await import("../src/Policy.js");
+    const provider = new RuleProvider([
+      { action: "billing.*", decision: "denied", reason: "money needs a human" },
+      { action: "*", decision: "allowed", reason: "catch-all" },
+    ]);
+    const first = provider.explain({ ...req, actionName: "billing.refund" });
+    expect(first.decision).toBe("denied");
+    expect([first.matchedIndex, first.matchedAction]).toEqual([0, "billing.*"]);
+    expect(first.totalRules).toBe(2);
+    expect(provider.decide({ ...req, actionName: "billing.refund" }).reason).toBe(first.reason);
+
+    const caught = provider.explain({ ...req, actionName: "deploy.prod", risk: "low" });
+    expect(caught.decision).toBe("allowed");
+    expect([caught.matchedIndex, caught.matchedAction]).toEqual([1, "*"]);
+
+    const defaulted = new RuleProvider([]).explain(req);
+    expect(defaulted.decision).toBe("denied");
+    expect(defaulted.matchedIndex).toBeNull();
+    expect(defaulted.matchedAction).toBeNull();
+  });
+});
+
 describe("checkpointJournal", () => {
   it("commits count+head and the witness verifies", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "ic-cp-"));
