@@ -70,13 +70,52 @@ class AuditReport:
         )
 
 
-def audit_journal(path: Path, public_keys: PublicKeys) -> AuditReport:
+def _count_journal_lines(path: Path) -> int:
+    """Number of non-blank lines in *path* (a cheap forward scan)."""
+    count = 0
+    with open(path, "rb") as handle:
+        for raw in handle:
+            if raw.strip():
+                count += 1
+    return count
+
+
+def _check_max_events(path: Path, max_events: int | None) -> None:
+    """Refuse to audit a journal larger than *max_events* (when set).
+
+    The audit state grows with history (one record per decision plus the
+    event-id set), so an unbounded journal is an unbounded allocation. The
+    fix is operational — audit per rotated file — not a bigger heap, hence a
+    loud refusal with the recipe instead of a slow OOM.
+    """
+    if max_events is None:
+        return
+    if max_events < 1:
+        raise ValueError("max_events must be positive")
+    try:
+        size = _count_journal_lines(path)
+    except OSError:
+        return  # unreadable journals fail later with the precise error
+    if size > max_events:
+        raise EvidenceAuditError(
+            f"journal holds {size} events, over the --max-events limit of {max_events}; "
+            "audit per rotated file instead (`interceptor archive` keeps files small, "
+            "`interceptor verify-chain` covers custody across them)"
+        )
+
+
+def audit_journal(
+    path: Path, public_keys: PublicKeys, *, max_events: int | None = None
+) -> AuditReport:
     """Verify *path*, then build its operational action audit.
 
     *public_keys* may be a single ``Ed25519PublicKey`` or the full set of keys
     an operator still trusts, so a journal spanning a key rotation audits as
-    one coherent history.
+    one coherent history. With *max_events*, refuse journals larger than the
+    limit instead of allocating unbounded audit state (see
+    :func:`_check_max_events`).
     """
+    _check_max_events(path, max_events)
     return audit_verified_snapshot(load_journal_snapshot(path, public_keys))
 
 
@@ -116,15 +155,20 @@ def _project_audit_event(event: dict[str, Any]) -> dict[str, Any]:
     return {key: event.get(key) for key in _AUDIT_EVENT_FIELDS}
 
 
-def audit_journal_streaming(path: Path, public_keys: PublicKeys) -> AuditReport:
+def audit_journal_streaming(
+    path: Path, public_keys: PublicKeys, *, max_events: int | None = None
+) -> AuditReport:
     """Verify *path* and audit it in a single streaming pass.
 
     Identical results to :func:`audit_journal` (same report, same refusal on
     journals that fail verification), but peak memory is bounded by the audit
     state — one small record per decision plus the event-id set — instead of
     the full event bodies. Prefer this for large or rotated journals; the
-    CLI uses it for every ``audit`` invocation.
+    CLI uses it for every ``audit`` invocation. *max_events* refuses
+    oversized journals before allocating that state (see
+    :func:`_check_max_events`).
     """
+    _check_max_events(path, max_events)
     return audit_verified_snapshot(
         load_journal_snapshot(path, public_keys, project=_project_audit_event)
     )
