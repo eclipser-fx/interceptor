@@ -7,7 +7,8 @@ never modify the journal; mutating ones (``checkpoint``, ``countersign``,
 ``resolve``, ``archive``, ``key-rotate``, ``keygen``, ``witness``,
 ``export --output``) say so in their help.
 
-    interceptor verify [--journal PATH] [--public-key PATH] [--checkpoint PATH] [--json]
+    interceptor verify [--journal PATH] [--public-key PATH] [--checkpoint PATH]
+                     [--witness-max-age SECONDS] [--json]
     interceptor verify-chain [--journal PATH] [--public-key PATH] [--json]
     interceptor witness --witness-dir DIR [--journal PATH] [--counter-key PATH] [--json]
     interceptor witness-audit --witness-dir DIR [--journal PATH] [--public-key PATH] [--json]
@@ -34,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="checkpoint witness file; the journal must cover its committed event count",
+    )
+    verify.add_argument(
+        "--witness-max-age",
+        type=_positive_int,
+        default=None,
+        help="warn (never fail) when the covering checkpoint file is older "
+        "than N seconds; a stale witness weakens the truncation bound",
     )
     verify.add_argument("--json", action="store_true", help="emit JSON")
 
@@ -372,6 +381,17 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         return EXIT_FAILURE
 
     result = verify_journal(journal_path, keys, checkpoint=args.checkpoint)
+    witness_age: float | None = None
+    if args.checkpoint is not None:
+        try:
+            witness_age = max(0.0, time.time() - args.checkpoint.stat().st_mtime)
+        except OSError:
+            witness_age = None
+    witness_stale = (
+        witness_age is not None
+        and args.witness_max_age is not None
+        and witness_age > args.witness_max_age
+    )
     payload: dict[str, Any] = {
         "journal": str(journal_path),
         "valid": result.valid,
@@ -381,6 +401,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             for issue in result.issues
         ],
     }
+    if args.checkpoint is not None:
+        payload["witness_age_seconds"] = witness_age
+        payload["witness_stale_warning"] = witness_stale
 
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -389,6 +412,14 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         print(f"    {result.events_verified} events, signatures and hash chain intact")
         if args.checkpoint:
             print("    checkpoint witness applied; truncation before it is detected")
+            if witness_age is not None:
+                print(f"    witness age: {witness_age:.0f}s")
+            if witness_stale:
+                print(
+                    "    WARNING: covering witness is older than "
+                    f"--witness-max-age {args.witness_max_age}s; "
+                    "the truncation bound is stale — run `interceptor witness`"
+                )
         else:
             print("    note: tail truncation is detectable only with a checkpoint witness")
     else:
