@@ -33,6 +33,89 @@ export interface CheckpointReport {
   readonly witnessPath: string;
 }
 
+export interface WitnessPruneReport {
+  readonly witnessDir: string;
+  readonly kept: ReadonlyArray<string>;
+  readonly deleted: ReadonlyArray<string>;
+}
+
+/**
+ * Delete the oldest shipped witnesses, keeping the newest `keep`.
+ *
+ * A frequent checkpoint schedule fills a witness directory without bound;
+ * pruning keeps it finite. It is safe for the truncation bound because every
+ * witness commits to an event count and counts grow with the journal: the
+ * newest witness subsumes every older prefix bound, so keeping the newest K
+ * preserves the K strongest bounds and only reduces historical depth.
+ * `latest.checkpoint` (a pointer, not an independent witness) is never
+ * deleted. Entries that are not regular files, or whose mtime cannot be
+ * read, are kept and do not count against `keep` — pruning deletes only
+ * what it positively identifies as an old regular file.
+ *
+ * One directory per journal: checkpoint files carry no journal identity, so
+ * a directory mixing witnesses from several journals cannot prune
+ * per-journal.
+ */
+export const pruneWitnesses = (
+  witnessDir: string,
+  keep: number,
+): Effect.Effect<WitnessPruneReport, CheckpointError> => {
+  if (!Number.isInteger(keep) || keep < 1) {
+    return Effect.die(new Error("keep must be a positive integer"));
+  }
+  return Effect.gen(function* () {
+    let names: Array<string>;
+    try {
+      const stat = fs.statSync(witnessDir);
+      if (!stat.isDirectory()) {
+        return yield* new CheckpointError({ message: `witness dir ${witnessDir} is not a directory` });
+      }
+      names = fs.readdirSync(witnessDir);
+    } catch (cause) {
+      return yield* new CheckpointError({ message: `no witness dir at ${witnessDir}: ${cause}` });
+    }
+    const dated: Array<{ mtimeMs: number; name: string }> = [];
+    const unassessed: Array<string> = [];
+    for (const name of names) {
+      if (!name.endsWith(".checkpoint") || name === "latest.checkpoint") continue;
+      const full = path.join(witnessDir, name);
+      try {
+        const stat = fs.statSync(full);
+        if (!stat.isFile()) {
+          unassessed.push(full);
+          continue;
+        }
+        dated.push({ mtimeMs: stat.mtimeMs, name });
+      } catch {
+        unassessed.push(full);
+      }
+    }
+    dated.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const victims = dated.slice(0, Math.max(0, dated.length - keep)).map((entry) => entry.name);
+    const kept = dated.slice(victims.length).map((entry) => entry.name);
+    const deleted: Array<string> = [];
+    const failures: Array<string> = [];
+    for (const name of victims) {
+      try {
+        fs.unlinkSync(path.join(witnessDir, name));
+        deleted.push(path.join(witnessDir, name));
+      } catch (cause) {
+        failures.push(`${name}: ${cause}`);
+      }
+    }
+    if (failures.length > 0) {
+      return yield* new CheckpointError({
+        message: `could not delete ${failures.length} witness(es) in ${witnessDir}: ${failures.join("; ")}`,
+      });
+    }
+    return {
+      witnessDir,
+      kept: [...kept.map((name) => path.join(witnessDir, name)), ...unassessed],
+      deleted,
+    } satisfies WitnessPruneReport;
+  });
+};
+
 const countLines = (journalPath: string): number => {
   let content: string;
   try {
