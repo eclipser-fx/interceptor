@@ -104,6 +104,44 @@ def test_audit_fails_gate_for_incomplete_invocation(evidence_home, capsys):
     assert "before retrying" in out
 
 
+def test_audit_status_filter_is_display_only(evidence_home, capsys):
+    record()
+    # Filtering to a non-matching status shows nothing but still exits OK:
+    # the gate reflects the full journal, never the filtered view.
+    assert main(["audit", "--json", "--status", "failed"]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["succeeded"] == 1
+    assert payload["invocations"] == []
+    assert payload["filter"]["statuses"] == ["failed"]
+    assert payload["filter"]["total"] == 1
+
+
+def test_audit_limit_truncates_display_only(evidence_home, capsys):
+    record()
+    record(action="cli.second")
+    assert main(["audit", "--json", "--limit", "1"]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["succeeded"] == 2
+    assert len(payload["invocations"]) == 1
+    assert payload["filter"]["truncated"] is True
+
+    assert main(["audit", "--limit", "1"]) == EXIT_OK
+    assert "showing 1 of 2" in capsys.readouterr().out
+
+
+def test_audit_filter_never_masks_reconciliation(evidence_home, capsys):
+    record()
+    path = evidence_home / "journal.jsonl"
+    path.write_text(path.read_text().splitlines()[0] + "\n")
+
+    # Even filtered to a clean status, the exit code reflects the full journal.
+    assert main(["audit", "--status", "succeeded"]) == EXIT_FAILURE
+    capsys.readouterr()
+    assert main(["audit", "--status", "succeeded", "--json"]) == EXIT_FAILURE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["needs_reconciliation"] is True
+
+
 def test_unknown_command_is_a_usage_error(capsys):
     with pytest.raises(SystemExit) as caught:
         main(["nonsense"])
