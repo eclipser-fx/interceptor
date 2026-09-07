@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from interceptor.engine import reset_idempotency_state
-from interceptor.journal import reset_precheck_cache
+from interceptor.journal import reset_idem_index, reset_precheck_cache
 from interceptor.observer import reset_notifications
 
 _REAL_SOCKET = socket.socket
@@ -54,10 +54,12 @@ def _reset_observer_state() -> None:
     reset_notifications()
     reset_idempotency_state()
     reset_precheck_cache()
+    reset_idem_index()
     yield
     reset_notifications()
     reset_idempotency_state()
     reset_precheck_cache()
+    reset_idem_index()
 
 
 @pytest.fixture
