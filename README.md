@@ -1,5 +1,11 @@
 # interceptor
 
+[![CI](https://github.com/rapture-fx/interceptor/actions/workflows/ci.yml/badge.svg)](https://github.com/rapture-fx/interceptor/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/rapture-fx/interceptor?sort=semver)](https://github.com/rapture-fx/interceptor/releases)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Node](https://img.shields.io/badge/node-20-green)](https://nodejs.org/)
+[![License](https://img.shields.io/github/license/rapture-fx/interceptor)](LICENSE)
+
 Approval-gated, tamper-evident evidence for consequential Python function
 calls — the ones you would not want to happen twice, silently, or unapproved.
 
@@ -36,12 +42,18 @@ OK  ~/.interceptor/journal.jsonl
 
 ## Install
 
+The `interceptor` name on PyPI belongs to an unrelated package, so install
+from source until a published name is announced:
+
 ```sh
-pip install interceptor
+git clone https://github.com/rapture-fx/interceptor.git
+cd interceptor
+pip install -e .
 ```
 
 One runtime dependency: `cryptography`, for Ed25519. Everything else is the
-standard library.
+standard library. Development tooling is pinned in `uv.lock`
+(`uv sync` reproduces it exactly).
 
 ## What's new in interceptor
 
@@ -98,6 +110,28 @@ Production-hardening batch:
   the predecessor's `(count, head)`.
 - **Independent verifier** — `verifiers/node/verify.mjs` checks any journal
   with Node builtins only, cross-tested against Python-made journals.
+
+0.2.0 batch (see [`CHANGELOG.md`](CHANGELOG.md) for the full list):
+
+- **Witness freshness gate** — `WitnessFreshnessProvider` denies high-risk
+  actions when the off-host witness is missing or older than
+  `max_age_seconds`, instead of merely paging afterwards.
+- **Faster idempotent calls** — an exact in-process index replaces per-call
+  journal scans (~306 calls/s flat from 400 to 4,000 events, measured with
+  `benchmarks/bench_idempotent.py`); any mismatch falls back to a scan.
+- **Streaming audit** — the `audit` command holds one small record per
+  decision instead of full event bodies, with identical reports.
+- **Audit triage** — `audit --status/--limit` filters the display without
+  changing counts or exit codes; `--max-events` refuses oversized journals
+  with a pointer to per-file auditing.
+- **Witness retention** — `interceptor witness-prune --keep N` bounds the
+  witness directory; `verify --witness-max-age N` warns on stale covering
+  witnesses.
+- **Operations** — systemd units in `deploy/systemd/` (witness, verify,
+  monthly prune) with a parser-backed unit test; bounded in-process
+  idempotency memory.
+- **TypeScript sibling** — `ts/` (`interceptor-effect`, Effect-based) ports
+  the freshness provider and witness retention with vitest suites.
 
 ## What problem this solves
 
@@ -298,9 +332,10 @@ from interceptor import guard
 def refund(order_id: str, amount_cents: int): ...
 ```
 
-Cross-process detection scans the file journal; custom `JournalStore`s are
-covered within the process. This blocks duplicates — it does not replay
-results, since results are never stored.
+Cross-process detection is resolved against the file journal through an
+exact in-process index (falling back to a scan on any mismatch); custom
+`JournalStore`s are covered within the process. This blocks duplicates —
+it does not replay results, since results are never stored.
 
 `dry_run=True` records the signed decision event and returns `None` without
 executing and without an outcome. Audits classify it as `dry_run`, never as
@@ -372,11 +407,19 @@ would record an outcome before any work runs.
 
 ```sh
 interceptor verify --journal ./journal.jsonl --public-key ./verify_key.pem
+interceptor verify --checkpoint ./latest.checkpoint --witness-max-age 600
+interceptor verify-chain     # live journal plus every archived predecessor
 interceptor audit --journal ./journal.jsonl --public-key ./verify_key.pem
+interceptor audit --status needs_reconciliation   # triage filter (display only)
 interceptor inspect          # what would this journal disclose if shared?
 interceptor key-info
 interceptor key-rotate      # replace the signing key; old events stay verifiable
 interceptor keygen --output ./counter.pem   # standalone key for counter-signing
+interceptor checkpoint      # commit the tail to a signed witness
+interceptor countersign --signing-key ./counter.pem
+interceptor witness --witness-dir /mnt/backup-witness   # checkpoint and ship
+interceptor witness-audit --witness-dir /mnt/backup-witness
+interceptor witness-prune --witness-dir /mnt/backup-witness --keep 2000
 interceptor resolve --decision <id> --result completed|not-completed
 interceptor export --format html --output ./pack.html
 interceptor stats
@@ -385,7 +428,10 @@ interceptor archive --keep 12   # rotate the live journal, keep 12 predecessors
 
 Journals are checkable without this package: `verifiers/node/verify.mjs`
 implements `docs/EVIDENCE_FORMAT.md` with Node builtins only, and the test
-suite cross-verifies Python-made journals with it.
+suite cross-verifies Python-made journals with it. A fuller TypeScript
+sibling lives in `ts/` (`interceptor-effect`, Effect-based guard, policy,
+and witness client with vitest suites); the committed vectors in
+`verifiers/vectors/v1/` are checked by both implementations.
 
 `verify` checks signatures and the hash chain. Each event must be signed by a
 key the operator trusts: pass `--public-key` (repeatable) to pin specific keys,
@@ -558,8 +604,8 @@ quietly stops recording is worse than one that stops.
 - replay results for idempotent calls. `idempotency_key` *blocks* a second
   execution of a completed key (raising `DuplicateActionError`) but never
   replays a stored result — results are not stored, and retries after failure
-  are allowed. Cross-process detection scans the file journal; custom
-  `JournalStore`s are covered within the process only.
+  are allowed. Cross-process detection is resolved against the file journal;
+  custom `JournalStore`s are covered within the process only.
 
 `ExecutionCompletedEvidenceError` names the one genuinely awkward state — the
 function ran, the outcome could not be recorded — as its own exception type, so
@@ -573,6 +619,15 @@ uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
+```
+
+TypeScript sibling (`ts/`, Node 20):
+
+```sh
+cd ts
+pnpm install --frozen-lockfile
+pnpm check        # tsc --noEmit
+pnpm test         # vitest run
 ```
 
 `uv.lock` pins the full dependency tree — CI runs `uv sync --frozen`, so a
