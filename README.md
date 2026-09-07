@@ -352,6 +352,7 @@ interceptor verify --checkpoint ./latest.checkpoint --witness-max-age 600
 interceptor verify-chain     # live journal plus every archived predecessor
 interceptor audit --journal ./journal.jsonl --public-key ./verify_key.pem
 interceptor audit --status needs_reconciliation   # triage filter (display only)
+interceptor policy-test --policy ./policy.json --action billing.refund --risk high
 interceptor inspect          # what would this journal disclose if shared?
 interceptor key-info
 interceptor key-rotate      # replace the signing key; old events stay verifiable
