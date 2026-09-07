@@ -272,6 +272,58 @@ def test_multiprocess_same_key_executes_once(tmp_path: Path, evidence_home: Path
     assert completed["decision"] == "allowed"
 
 
+def test_completed_file_set_is_fifo_capped(tmp_path: Path):
+    from interceptor.engine import (
+        _COMPLETED_FILE,
+        _COMPLETED_FILE_MAX,
+        _is_completed,
+        _mark_completed,
+    )
+
+    store = FileJournal(tmp_path / "j.jsonl")
+    for index in range(_COMPLETED_FILE_MAX + 100):
+        _mark_completed(store, "cap.act", f"key-{index}")
+    assert len(_COMPLETED_FILE) == _COMPLETED_FILE_MAX
+    assert not _is_completed(store, "cap.act", "key-0")
+    assert _is_completed(store, "cap.act", f"key-{_COMPLETED_FILE_MAX + 99}")
+
+
+def test_evicted_file_key_still_blocked_by_journal(tmp_path: Path):
+    from interceptor.engine import _COMPLETED_FILE_MAX, _mark_completed
+
+    journal = tmp_path / "j.jsonl"
+
+    @guard(action="evict.act", journal=journal, approval_provider=allow(), idempotency_key="k")
+    def act(k: str) -> str:
+        return "ok"
+
+    act("victim")
+    store = FileJournal(journal)
+    for index in range(_COMPLETED_FILE_MAX):
+        _mark_completed(store, "evict.act", f"filler-{index}")
+    # The in-process entry was evicted, but the journal remains authoritative.
+    with pytest.raises(DuplicateActionError):
+        act("victim")
+
+
+def test_custom_store_completions_are_not_capped():
+    from interceptor.engine import _COMPLETED_CUSTOM, _is_completed, _mark_completed
+
+    class MemoryStore:
+        @property
+        def path(self):  # type: ignore[no-untyped-def]
+            raise RuntimeError("no path")
+
+        def append_event(self, build):  # type: ignore[no-untyped-def]
+            raise AssertionError("not used")
+
+    store = MemoryStore()
+    for index in range(300):
+        _mark_completed(store, "custom.act", f"key-{index}")  # type: ignore[arg-type]
+    assert len(_COMPLETED_CUSTOM) == 300
+    assert _is_completed(store, "custom.act", "key-0")  # type: ignore[arg-type]
+
+
 def test_scan_fallback_without_index_flag(tmp_path: Path, no_index):
     journal = tmp_path / "j.jsonl"
 
