@@ -397,6 +397,21 @@ class Rule:
         return self.risks is None or request.risk in self.risks
 
 
+@dataclass(frozen=True)
+class RuleExplanation:
+    """What a :class:`RuleProvider` would decide, and which rule says so."""
+
+    decision: str
+    reason: str
+    matched_index: int | None
+    matched_action: str | None
+    total_rules: int
+
+    @property
+    def allowed(self) -> bool:
+        return self.decision == DECISION_ALLOWED
+
+
 class RuleProvider:
     """Decide from an ordered, serializable rule list.
 
@@ -420,14 +435,43 @@ class RuleProvider:
     def rules(self) -> tuple[Rule, ...]:
         return self._rules
 
-    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
-        for rule in self._rules:
+    def explain(self, request: ApprovalRequest) -> RuleExplanation:
+        """Decide *request* and say which rule decided it.
+
+        Returns the decision plus the zero-based index and glob of the first
+        matching rule, or ``None``/``None`` when the default applied. This is
+        what ``interceptor policy-test`` reports, so operators can check a
+        policy file without executing anything.
+        """
+        for index, rule in enumerate(self._rules):
             if rule.matches(request):
                 reason = rule.reason or f"matched rule {rule.action!r} -> {rule.decision}"
-                return ApprovalDecision(rule.decision, reason)
+                return RuleExplanation(
+                    decision=rule.decision,
+                    reason=reason,
+                    matched_index=index,
+                    matched_action=rule.action,
+                    total_rules=len(self._rules),
+                )
         if self._default == DECISION_ALLOWED:
-            return ApprovalDecision(DECISION_ALLOWED, "allowed by policy default")
-        return ApprovalDecision(DECISION_DENIED, "no policy rule matched; default deny")
+            return RuleExplanation(
+                decision=DECISION_ALLOWED,
+                reason="allowed by policy default",
+                matched_index=None,
+                matched_action=None,
+                total_rules=len(self._rules),
+            )
+        return RuleExplanation(
+            decision=DECISION_DENIED,
+            reason="no policy rule matched; default deny",
+            matched_index=None,
+            matched_action=None,
+            total_rules=len(self._rules),
+        )
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        explanation = self.explain(request)
+        return ApprovalDecision(explanation.decision, explanation.reason)
 
 
 #: Per-state-file in-process locks, so threads in one process serialize
