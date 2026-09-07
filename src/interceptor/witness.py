@@ -199,11 +199,93 @@ def audit_witnesses(
     return WitnessAuditReport(directory, tuple(statuses))
 
 
+@dataclasses.dataclass(frozen=True)
+class WitnessPruneReport:
+    witness_dir: Path
+    kept: tuple[Path, ...]
+    deleted: tuple[Path, ...]
+
+
+def prune_witnesses(witness_dir: str | Path, keep: int) -> WitnessPruneReport:
+    """Delete the oldest shipped witnesses, keeping the newest *keep*.
+
+    A 5-minute witness schedule writes ~105k files a year; without pruning
+    the directory grows without bound. Pruning is safe for the truncation
+    bound because every witness commits to an event count and counts grow
+    with the journal: the newest witness subsumes every older prefix bound,
+    so keeping the newest K preserves the K strongest bounds and only
+    reduces historical depth. ``latest.checkpoint`` (a pointer to the
+    newest stamped copy, not an independent witness) is never deleted.
+
+    Conservative where it matters: entries that are not regular files, or
+    whose mtime cannot be read, are kept and do not count against *keep* —
+    pruning deletes only what it positively identifies as an old regular
+    file. Partial unlink failures raise :class:`JournalError` naming what
+    could not be deleted (deletions so far are already gone).
+
+    One directory per journal: checkpoint files carry no journal identity,
+    so a directory mixing witnesses from several journals cannot prune
+    per-journal — keep-newest-K would delete the only witness of a quiet
+    journal while keeping K of a busy one.
+    """
+    if keep < 1:
+        raise ValueError("keep must be positive")
+    directory = Path(witness_dir)
+    if not directory.exists():
+        raise JournalError(f"no witness dir at {directory}")
+    if not directory.is_dir():
+        raise JournalError(f"witness dir {directory} is not a directory")
+    try:
+        candidates = sorted(
+            (p for p in directory.glob("*.checkpoint") if p.name != "latest.checkpoint"),
+            key=lambda p: p.name,
+        )
+    except OSError as exc:
+        raise JournalError(f"cannot list witness dir {directory}: {exc}") from exc
+    regular: list[tuple[int, str, Path]] = []
+    unassessed: list[Path] = []
+    for candidate in candidates:
+        try:
+            if not candidate.is_file():
+                unassessed.append(candidate)
+                continue
+            mtime_ns = candidate.stat().st_mtime_ns
+        except OSError:
+            unassessed.append(candidate)
+            continue
+        regular.append((mtime_ns, candidate.name, candidate))
+    regular.sort(key=lambda item: (item[0], item[1]))
+    paths = [path for _, _, path in regular]
+    victims = paths[: max(0, len(paths) - keep)]
+    kept = paths[len(victims) :]
+    deleted: list[Path] = []
+    failures: list[str] = []
+    for victim in victims:
+        try:
+            victim.unlink()
+            deleted.append(victim)
+        except OSError as exc:
+            failures.append(f"{victim}: {exc}")
+    if failures:
+        raise JournalError(
+            "could not delete {} witness(es) in {}: {}".format(
+                len(failures), directory, "; ".join(failures)
+            )
+        )
+    return WitnessPruneReport(
+        witness_dir=directory,
+        kept=tuple(kept + unassessed),
+        deleted=tuple(deleted),
+    )
+
+
 __all__ = [
     "WITNESS_EVENT_TYPE",
     "WitnessAuditReport",
     "WitnessFileStatus",
+    "WitnessPruneReport",
     "WitnessReport",
     "audit_witnesses",
+    "prune_witnesses",
     "witness_journal",
 ]
