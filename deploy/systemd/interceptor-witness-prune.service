@@ -1,0 +1,19 @@
+[Unit]
+Description=interceptor: prune oldest shipped witnesses, keeping the newest N
+Documentation=https://github.com/wiramahendra/guardrail-evidence/blob/main/docs/DEPLOYMENT.md
+
+[Service]
+Type=oneshot
+User=interceptor
+Group=interceptor
+# Keeping the newest witnesses preserves the strongest truncation bounds;
+# only historical depth is lost. One witness dir per journal.
+Environment=INTERCEPTOR_WITNESS_DIR=/mnt/backup-witness
+Environment=INTERCEPTOR_WITNESS_KEEP=2000
+ExecStart=/usr/local/bin/interceptor witness-prune --witness-dir ${INTERCEPTOR_WITNESS_DIR} --keep ${INTERCEPTOR_WITNESS_KEEP}
+SuccessExitStatus=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/backup-witness
