@@ -148,20 +148,23 @@ def _extract_receipt(
 #: their triples in a FIFO-capped map: eviction is safe because the journal
 #: scan (or the exact index) stays authoritative across processes, so a
 #: dropped entry costs at most one rescan. Custom JournalStores have no
-#: on-disk scan to fall back on — their in-process set is the only dedup —
-#: so their triples are kept uncapped (custom stores are test/ephemeral
-#: scope; production journals are files).
+#: on-disk scan to fall back on, so their triples live exactly as long as
+#: the store object itself (weakref finalizers purge them on collection) —
+#: no cap needed, no leak possible, and dedup never silently lost.
 _COMPLETED_FILE_MAX = 8192
 _COMPLETED_FILE: dict[tuple[str, str, str], None] = {}
 _COMPLETED_CUSTOM: set[tuple[str, str, str]] = set()
 _COMPLETED_IDEMPOTENCY_LOCK = threading.Lock()
+_TRACKED_CUSTOM_TOKENS: set[str] = set()
 
 #: Stable per-store tokens that never reuse ``id()`` addresses. A token is
 #: pinned to the store object itself so a garbage-collected store cannot hand
-#: its identity to a later object allocated at the same address.
-_STORE_TOKENS: dict[int, str] = {}
-_STORE_TOKENS_GUARD = threading.Lock()
+#: its identity to a later object allocated at the same address. Stores that
+#: cannot pin attributes (C slots) get a fresh counter token per call — the
+#: counter alone guarantees uniqueness, and nothing is retained, so there is
+#: no map to leak.
 _STORE_TOKEN_COUNTER = 0
+_STORE_TOKEN_GUARD = threading.Lock()
 
 
 def _store_path(store: JournalStore) -> Path | None:
@@ -204,13 +207,42 @@ def _journal_key(store: JournalStore) -> str:
             store.__interceptor_store_token__ = token  # type: ignore[attr-defined]
         except Exception:
             global _STORE_TOKEN_COUNTER
-            with _STORE_TOKENS_GUARD:
+            with _STORE_TOKEN_GUARD:
                 _STORE_TOKEN_COUNTER += 1
                 token = f"store:unattached-{_STORE_TOKEN_COUNTER}"
-                _STORE_TOKENS[id(store)] = token
         return token
     except Exception:
         return f"store:{type(store).__name__}:{id(store)}"
+
+
+def _purge_custom_token(token: str) -> None:
+    """Drop every completion triple namespaced to a collected custom store."""
+    try:
+        with _COMPLETED_IDEMPOTENCY_LOCK:
+            _COMPLETED_CUSTOM.difference_update(
+                {triple for triple in _COMPLETED_CUSTOM if triple[0] == token}
+            )
+            _TRACKED_CUSTOM_TOKENS.discard(token)
+    except Exception:  # noqa: S110 - GC callbacks must never raise, even at shutdown
+        pass
+
+
+def _track_custom_store(store: JournalStore, token: str) -> None:
+    """Purge *token*'s triples when *store* is collected (once per token).
+
+    Stores that cannot take a weakref (C slots without ``__weakref__``) keep
+    today's behavior — their triples live with the process — rather than
+    failing a call that already succeeded.
+    """
+    if token in _TRACKED_CUSTOM_TOKENS:
+        return
+    try:
+        import weakref as _weakref
+
+        _weakref.finalize(store, _purge_custom_token, token)
+    except TypeError:
+        return
+    _TRACKED_CUSTOM_TOKENS.add(token)
 
 
 def _mark_completed(store: JournalStore, action_name: str, idempotency_key: str) -> None:
@@ -222,6 +254,8 @@ def _mark_completed(store: JournalStore, action_name: str, idempotency_key: str)
                 _COMPLETED_FILE.pop(next(iter(_COMPLETED_FILE)))
         else:
             _COMPLETED_CUSTOM.add(triple)
+    if not triple[0].startswith("file:"):
+        _track_custom_store(store, triple[0])
 
 
 def _is_completed(store: JournalStore, action_name: str, idempotency_key: str) -> bool:
@@ -237,6 +271,7 @@ def reset_idempotency_state() -> None:
     with _COMPLETED_IDEMPOTENCY_LOCK:
         _COMPLETED_FILE.clear()
         _COMPLETED_CUSTOM.clear()
+        _TRACKED_CUSTOM_TOKENS.clear()
 
 
 def _resolve_idempotency_key(
