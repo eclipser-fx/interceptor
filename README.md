@@ -40,6 +40,15 @@ OK  ~/.interceptor/journal.jsonl
     note: tail truncation is detectable only with a checkpoint witness
 ```
 
+## Contents
+
+- [Install](#install) · [The problem](#what-problem-this-solves) · [Usage](#usage)
+- [Verifying](#verifying) · [TypeScript sibling](#typescript-sibling)
+- [Guarantees](#what-the-evidence-does-and-does-not-establish)
+- [Operations](docs/DEPLOYMENT.md) · [Threat model](docs/THREAT_MODEL.md) ·
+  [Evidence format](docs/EVIDENCE_FORMAT.md) · [Performance](docs/PERFORMANCE.md)
+- [Development](#development) · [Changelog](CHANGELOG.md)
+
 ## Install
 
 The `interceptor` name on PyPI belongs to an unrelated package, so install
@@ -55,83 +64,15 @@ One runtime dependency: `cryptography`, for Ed25519. Everything else is the
 standard library. Development tooling is pinned in `uv.lock`
 (`uv sync` reproduces it exactly).
 
-## What's new in interceptor
+## Release history
 
 Renamed from `guardrail-evidence` (package `interceptor`, CLI `interceptor`,
-home `~/.interceptor`, env `INTERCEPTOR_EVIDENCE_HOME`), plus new capabilities:
-
-- **Value-pattern redaction** — built-in secret shapes (`sk-live-…`, `ghp_…`,
-  `xoxb-…`, `AKIA…`, PEM keys, JWTs) redacted even under generic names, with
-  custom `redact_patterns=[...]` regexes on `@guard` and `wrap_tool`.
-- **Policy approvals** (`interceptor.policy`) — composable offline providers:
-  `BudgetProvider`, `RateLimitProvider`, `AllowListProvider`/`PredicateProvider`,
-  `CachedApprovalProvider` (TTL auto-allow of identical calls, every call still
-  evidenced), `TimeoutApprovalProvider` (fail-closed), `AllOf`/`AnyOf`.
-- **Idempotency** (`idempotency_key=`) — a completed key records a denied
-  decision and raises `DuplicateActionError` instead of executing twice.
-  Retries after failure still run. File journals deduplicate across processes.
-- **Dry runs** (`dry_run=True`) — records the signed decision, returns `None`,
-  never executes; audits report `dry_run`, never `needs_reconciliation`.
-- **Easier bulk wrapping** — `wrap_tools(tools, risk="high")` now works without
-  an explicit `configuration` mapping (action per tool name).
-- **Hardening** — the once-per-process observer tracker no longer keys on
-  `id()` (a collected observer can't suppress a later one); audit flags
-  repeated `(action, idempotency_key)` successes as `duplicate_idempotency_key`.
-
-Maturity batch:
-
-- **Approval attribution** — the provider's `reason` and optional `approved_by`
-  are recorded on every decision event (scrubbed of redacted values), so audits
-  show *why* and *who*, not just *allowed*.
-- **Resolutions** — `audit` no longer dead-ends at `needs_reconciliation`:
-  `interceptor resolve --decision … --result completed|not-completed` appends a
-  signed operator attestation and clears the invocation to `resolved_completed`
-  or `resolved_not_completed`.
-- **Declarative policy** — `RuleProvider` with glob rules, plus
-  `load_policy_file()` for JSON policy-as-config (first match wins, default deny).
-- **Counter-signatures** — `interceptor keygen` + `interceptor countersign`
-  let a second key held elsewhere witness the newest checkpoint in-chain;
-  rewriting history then needs both keys.
-- **Auditor deliverables** — `interceptor export --format json|html` writes a
-  self-contained evidence pack; `interceptor stats` gives operational counts.
-
-Production-hardening batch:
-
-- **Receipts** — `receipt_from=` extracts provider reference IDs (processor
-  refund ids) from succeeded results into the signed outcome, after the same
-  redaction as inputs. Transcribed claims, not proof — but reconcilable ones.
-- **Quorum + web approvals** — `QuorumApprovalProvider` (N-of-M must allow)
-  and `ApprovalServer`, a token-authenticated LAN page to approve from a
-  browser or phone (stdlib only, fail-closed timeouts).
-- **Tool schemas** — `describe_tool()` / `as_openai_tool()` / `mcp_tool()`
-  derive JSON Schema from the signature the evidence commits to.
-- **Archive rotation** — `interceptor archive [--keep N]` rotates the live
-  journal to a timestamped file; the successor starts with a signed link to
-  the predecessor's `(count, head)`.
-- **Independent verifier** — `verifiers/node/verify.mjs` checks any journal
-  with Node builtins only, cross-tested against Python-made journals.
-
-0.2.0 batch (see [`CHANGELOG.md`](CHANGELOG.md) for the full list):
-
-- **Witness freshness gate** — `WitnessFreshnessProvider` denies high-risk
-  actions when the off-host witness is missing or older than
-  `max_age_seconds`, instead of merely paging afterwards.
-- **Faster idempotent calls** — an exact in-process index replaces per-call
-  journal scans (~306 calls/s flat from 400 to 4,000 events, measured with
-  `benchmarks/bench_idempotent.py`); any mismatch falls back to a scan.
-- **Streaming audit** — the `audit` command holds one small record per
-  decision instead of full event bodies, with identical reports.
-- **Audit triage** — `audit --status/--limit` filters the display without
-  changing counts or exit codes; `--max-events` refuses oversized journals
-  with a pointer to per-file auditing.
-- **Witness retention** — `interceptor witness-prune --keep N` bounds the
-  witness directory; `verify --witness-max-age N` warns on stale covering
-  witnesses.
-- **Operations** — systemd units in `deploy/systemd/` (witness, verify,
-  monthly prune) with a parser-backed unit test; bounded in-process
-  idempotency memory.
-- **TypeScript sibling** — `ts/` (`interceptor-effect`, Effect-based) ports
-  the freshness provider and witness retention with vitest suites.
+home `~/.interceptor`, env `INTERCEPTOR_EVIDENCE_HOME`). The current release
+is `0.2.0`: witness freshness gates, a flat ~306 calls/s idempotent path,
+streaming audit with triage filters, witness retention and pruning, systemd
+units, bounded idempotency memory, and a TypeScript sibling that ports the
+freshness provider and retention. Every notable change is recorded in
+[`CHANGELOG.md`](CHANGELOG.md), newest first.
 
 ## What problem this solves
 
@@ -581,6 +522,57 @@ Called once per contract version, before approval and before execution, with
 the contract only — never arguments, results, events, or keys. If it raises,
 the function does not run. There is no silent fallback, because a recorder that
 quietly stops recording is worse than one that stops.
+
+## TypeScript sibling
+
+Yes — `ts/` belongs in this README. It is a second implementation for
+TypeScript agents, not a port of convenience: the `interceptor-effect`
+package (Effect-based, Node 20) guards TS functions with the same
+decision/outcome evidence over the same journal format, so either side can
+verify the other's journals. The committed vectors in
+`verifiers/vectors/v1/` are checked by both implementations, plus a
+dependency-free Node verifier at `verifiers/node/verify.mjs`.
+
+Install and use:
+
+```sh
+cd ts
+pnpm install --frozen-lockfile
+```
+
+```ts
+import { Effect } from "effect";
+import { Guard, Identity, Journal, Policy } from "interceptor-effect";
+
+const program = Effect.gen(function* () {
+  const journal = Journal.makeFileJournal("./journal.jsonl");
+  const identity = yield* Identity.generateIdentity();
+  const budget = yield* Policy.BudgetProvider.make(100, true);
+
+  const refund = Guard.guard({
+    action: "billing.refund",
+    journal,
+    approve: (request) => budget.decide(request),
+    identity,
+  })((orderId: string) => processRefund(orderId));
+
+  return yield* refund("order-1");
+});
+
+await Effect.runPromise(program);
+```
+
+Covered in TypeScript: guard with approval gate and signed decision/outcome
+evidence, STM idempotency reservations, dry runs, receipts, canonicalization
+with homoglyph folding and value-pattern redaction, budgets (memory and
+durable), rate limits, spending caps, attested approvals, quorum and
+declarative glob policy, checkpoints with witness files and retention
+pruning, archive custody verification, and an HTTP witness service with
+signed checkpoints. Python remains the reference implementation — new
+capabilities land there first and are ported where TS agents need them
+(freshness gates and retention are already ported); the evidence format in
+[`docs/EVIDENCE_FORMAT.md`](docs/EVIDENCE_FORMAT.md) is the contract both
+sides implement.
 
 ## What the evidence does and does not establish
 
