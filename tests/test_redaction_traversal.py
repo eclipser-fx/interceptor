@@ -183,5 +183,8 @@ def test_declared_extra_names_reach_dataclass_fields(evidence_home):
     def act(config: Custom) -> str:
         return "ok"
 
-    act(Custom(pin="9074"))
-    assert "9074" not in (evidence_home / "journal.jsonl").read_text()
+    # Long, non-hex secret: a short numeric PIN like "9074" can appear by
+    # chance inside a timestamp or UUID elsewhere in the journal, flaking
+    # the absence assertion. This value cannot occur in either.
+    act(Custom(pin="pin-SECRET-0987654321"))
+    assert "pin-SECRET-0987654321" not in (evidence_home / "journal.jsonl").read_text()
