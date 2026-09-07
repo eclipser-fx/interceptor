@@ -142,6 +142,58 @@ def test_audit_filter_never_masks_reconciliation(evidence_home, capsys):
     assert payload["needs_reconciliation"] is True
 
 
+def test_verify_warns_on_stale_covering_witness(evidence_home, tmp_path, capsys):
+    import os
+    import time
+
+    from interceptor import witness_journal
+
+    record()
+    journal = evidence_home / "journal.jsonl"
+    witness_dir = tmp_path / "witness"
+    report = witness_journal(journal, witness_dir)
+    old = time.time() - 3600
+    os.utime(report.shipped_path, (old, old))
+
+    assert main(["verify", "--checkpoint", str(report.shipped_path)]) == EXIT_OK
+    assert "witness age" in capsys.readouterr().out
+
+    assert (
+        main(
+            [
+                "verify",
+                "--checkpoint",
+                str(report.shipped_path),
+                "--witness-max-age",
+                "300",
+            ]
+        )
+        == EXIT_OK
+    )
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "stale" in out
+
+    assert (
+        main(
+            [
+                "verify",
+                "--checkpoint",
+                str(report.shipped_path),
+                "--witness-max-age",
+                "7200",
+                "--json",
+            ]
+        )
+        == EXIT_OK
+    )
+    import json as _json
+
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["witness_stale_warning"] is False
+    assert payload["witness_age_seconds"] is not None and payload["witness_age_seconds"] > 3000
+
+
 def test_unknown_command_is_a_usage_error(capsys):
     with pytest.raises(SystemExit) as caught:
         main(["nonsense"])
