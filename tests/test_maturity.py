@@ -242,6 +242,46 @@ def test_load_policy_file_rejects_garbage(tmp_path):
         load_policy_file(path)
 
 
+def test_rule_explain_names_first_match_and_default(tmp_path):
+    from interceptor.policy import Rule
+
+    provider = RuleProvider(
+        [
+            Rule(action="billing.*", decision="denied", reason="money needs a human"),
+            Rule(action="*", decision="allowed", reason="catch-all"),
+        ]
+    )
+
+    def req(action: str, risk: str = "high") -> ic.ApprovalRequest:
+        return ic.ApprovalRequest(
+            action_name=action,
+            risk=risk,
+            approval_mode="required",
+            redacted_input_summary="",
+            input_hash="h",
+            contract_hash="c",
+        )
+
+    first = provider.explain(req("billing.refund"))
+    assert first.decision == "denied"
+    assert (first.matched_index, first.matched_action) == (0, "billing.*")
+    assert first.total_rules == 2
+    assert not first.allowed
+    # First match wins even though the catch-all would also match.
+    assert provider.decide(req("billing.refund")).reason == first.reason
+
+    catch = provider.explain(req("deploy.prod", "low"))
+    assert catch.decision == "allowed"
+    assert (catch.matched_index, catch.matched_action) == (1, "*")
+    assert catch.allowed
+
+    defaulted = RuleProvider([]).explain(req("anything"))
+    assert defaulted.decision == "denied"
+    assert defaulted.matched_index is None
+    assert defaulted.matched_action is None
+    assert defaulted.total_rules == 0
+
+
 # --- countersignatures -------------------------------------------------------
 
 
